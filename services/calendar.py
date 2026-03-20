@@ -1,43 +1,45 @@
 """
 Revory - Google Calendar Service
-OAuth Desktop App + CRUD
+OAuth через публичный callback URL + CRUD
 """
 
-import os
-import json
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+
+from services.database import load_google_token, save_google_token
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 CREDENTIALS_FILE = "credentials.json"
-TOKENS_DIR = "tokens"
+
+# user_id -> Flow (живёт в памяти пока идёт OAuth)
+_pending_flows: dict[int, Flow] = {}
 
 
-def _get_token_path(user_id: int) -> str:
-    os.makedirs(TOKENS_DIR, exist_ok=True)
-    return os.path.join(TOKENS_DIR, f"token_{user_id}.json")
+def _get_redirect_uri() -> str:
+    base = os.getenv("WEBHOOK_URL", "http://localhost:8000")
+    return f"{base}/auth/callback"
 
 
-def get_credentials(user_id: int) -> Optional[Credentials]:
-    token_path = _get_token_path(user_id)
-    if not os.path.exists(token_path):
+async def get_credentials(user_id: int) -> Optional[Credentials]:
+    token_data = await load_google_token(user_id)
+    if not token_data:
         return None
 
-    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    creds = Credentials.from_authorized_user_info(token_data, SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            with open(token_path, "w") as f:
-                f.write(creds.to_json())
+            await save_google_token(user_id, json.loads(creds.to_json()))
         except Exception as e:
             logger.error(f"Token refresh error for {user_id}: {e}")
             return None
@@ -46,38 +48,35 @@ def get_credentials(user_id: int) -> Optional[Credentials]:
 
 
 def start_auth(user_id: int) -> str:
-    flow = InstalledAppFlow.from_client_secrets_file(
+    """Создаёт OAuth flow и возвращает URL для авторизации."""
+    flow = Flow.from_client_secrets_file(
         CREDENTIALS_FILE,
         scopes=SCOPES,
-        redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+        redirect_uri=_get_redirect_uri(),
     )
-    auth_url, _ = flow.authorization_url(prompt="consent")
-
-    flow_path = os.path.join(TOKENS_DIR, f"flow_{user_id}.json")
-    os.makedirs(TOKENS_DIR, exist_ok=True)
-    with open(flow_path, "w") as f:
-        json.dump({"client_config": flow.client_config}, f)
-
+    auth_url, _ = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        state=str(user_id),
+    )
+    _pending_flows[user_id] = flow
     return auth_url
 
 
-def finish_auth(user_id: int, auth_code: str) -> bool:
+async def finish_auth_callback(user_id: int, code: str) -> bool:
+    """Завершает OAuth flow после редиректа. Вызывается из /auth/callback."""
+    flow = _pending_flows.get(user_id)
+    if not flow:
+        logger.error(f"No pending flow for user {user_id}")
+        return False
+
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            CREDENTIALS_FILE,
-            scopes=SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-        )
-        flow.fetch_token(code=auth_code)
+        flow.fetch_token(code=code)
         creds = flow.credentials
 
-        token_path = _get_token_path(user_id)
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
-
-        flow_path = os.path.join(TOKENS_DIR, f"flow_{user_id}.json")
-        if os.path.exists(flow_path):
-            os.remove(flow_path)
+        import json
+        await save_google_token(user_id, json.loads(creds.to_json()))
+        del _pending_flows[user_id]
 
         logger.info(f"Auth done for user {user_id}")
         return True
@@ -87,8 +86,8 @@ def finish_auth(user_id: int, auth_code: str) -> bool:
         return False
 
 
-def _get_service(user_id: int):
-    creds = get_credentials(user_id)
+async def _get_service(user_id: int):
+    creds = await get_credentials(user_id)
     if not creds:
         return None
     return build("calendar", "v3", credentials=creds)
@@ -99,9 +98,9 @@ async def create_event(
     title: str,
     start_time: datetime,
     end_time: Optional[datetime] = None,
-    description: str = ""
+    description: str = "",
 ) -> Optional[dict]:
-    service = _get_service(user_id)
+    service = await _get_service(user_id)
     if not service:
         return None
 
@@ -111,22 +110,12 @@ async def create_event(
     event_body = {
         "summary": title,
         "description": description,
-        "start": {
-            "dateTime": start_time.isoformat(),
-            "timeZone": "Europe/Moscow",
-        },
-        "end": {
-            "dateTime": end_time.isoformat(),
-            "timeZone": "Europe/Moscow",
-        },
+        "start": {"dateTime": start_time.isoformat(), "timeZone": "Europe/Moscow"},
+        "end": {"dateTime": end_time.isoformat(), "timeZone": "Europe/Moscow"},
     }
 
     try:
-        event = service.events().insert(
-            calendarId="primary",
-            body=event_body
-        ).execute()
-
+        event = service.events().insert(calendarId="primary", body=event_body).execute()
         logger.info(f"Created event: {event.get('id')} for user {user_id}")
         return {
             "id": event["id"],
@@ -135,7 +124,6 @@ async def create_event(
             "end": event["end"]["dateTime"],
             "link": event.get("htmlLink", ""),
         }
-
     except Exception as e:
         logger.error(f"Create event error: {e}")
         return None
@@ -145,9 +133,9 @@ async def get_events(
     user_id: int,
     time_min: Optional[datetime] = None,
     time_max: Optional[datetime] = None,
-    max_results: int = 10
+    max_results: int = 10,
 ) -> Optional[list]:
-    service = _get_service(user_id)
+    service = await _get_service(user_id)
     if not service:
         return None
 
@@ -158,44 +146,42 @@ async def get_events(
         time_max = time_min + timedelta(days=1)
 
     try:
-        result = service.events().list(
-            calendarId="primary",
-            timeMin=time_min.isoformat() + "+03:00",
-            timeMax=time_max.isoformat() + "+03:00",
-            maxResults=max_results,
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute()
-
+        result = (
+            service.events()
+            .list(
+                calendarId="primary",
+                timeMin=time_min.isoformat() + "+03:00",
+                timeMax=time_max.isoformat() + "+03:00",
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
         events = result.get("items", [])
         return [
             {
                 "id": e["id"],
-                "title": e.get("summary", "Bez nazvaniya"),
+                "title": e.get("summary", "Без названия"),
                 "start": e["start"].get("dateTime", e["start"].get("date")),
                 "end": e["end"].get("dateTime", e["end"].get("date")),
             }
             for e in events
         ]
-
     except Exception as e:
         logger.error(f"Get events error: {e}")
         return None
 
 
 async def delete_event(user_id: int, event_id: str) -> bool:
-    service = _get_service(user_id)
+    service = await _get_service(user_id)
     if not service:
         return False
 
     try:
-        service.events().delete(
-            calendarId="primary",
-            eventId=event_id
-        ).execute()
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
         logger.info(f"Deleted event {event_id} for user {user_id}")
         return True
-
     except Exception as e:
         logger.error(f"Delete event error: {e}")
         return False
