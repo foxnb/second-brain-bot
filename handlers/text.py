@@ -1,6 +1,6 @@
 """
-RevMind — Text Handler
-Роутер: принимает текст → AI парсит → вызывает calendar/напоминания.
+Revory — Text Handler
+Роутер: принимает текст → AI парсит → вызывает calendar.
 """
 
 import logging
@@ -12,8 +12,6 @@ from telegram.ext import ContextTypes
 from services.ai import parse_message
 from services.calendar import (
     get_credentials,
-    start_auth,
-    finish_auth,
     create_event,
     get_events,
     delete_event,
@@ -27,22 +25,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.message.from_user.id
 
-    # --- Проверка: если ждём OAuth-код ---
-    if context.user_data.get("awaiting_auth_code"):
-        success = finish_auth(user_id, text)
-        context.user_data["awaiting_auth_code"] = False
-        if success:
-            await update.message.reply_text(
-                "✅ Google Calendar подключён! Теперь можешь управлять расписанием."
-            )
-        else:
-            await update.message.reply_text(
-                "❌ Не удалось авторизоваться. Попробуй /auth заново."
-            )
-        return
-
     # --- Проверка: подключён ли Google Calendar ---
-    creds = get_credentials(user_id)
+    creds = await get_credentials(user_id)
     if not creds:
         await update.message.reply_text(
             "🔑 Сначала подключи Google Calendar.\n"
@@ -68,7 +52,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_delete(update, user_id, parsed)
 
     elif intent == "remind":
-        # Фаза 2 — пока заглушка
         reply = parsed.get("reply", "Напоминания скоро будут!")
         await update.message.reply_text(f"⏰ {reply}")
 
@@ -80,7 +63,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Создание события ─────────────────────────────────────
 
 async def _handle_create(update: Update, user_id: int, parsed: dict):
-    """Создать событие в Google Calendar."""
     title = parsed.get("title")
     date_str = parsed.get("date")
     time_str = parsed.get("time")
@@ -97,7 +79,7 @@ async def _handle_create(update: Update, user_id: int, parsed: dict):
     try:
         start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:
-        await update.message.reply_text("❌ Не смог разобрать дату/время. Попробуй формат: завтра в 15:00")
+        await update.message.reply_text("❌ Не смог разобрать дату/время. Попробуй: завтра в 15:00")
         return
 
     end_time_str = parsed.get("end_time")
@@ -125,7 +107,6 @@ async def _handle_create(update: Update, user_id: int, parsed: dict):
 # ─── Показ событий ────────────────────────────────────────
 
 async def _handle_show(update: Update, user_id: int, parsed: dict):
-    """Показать события из Google Calendar."""
     period = parsed.get("period", "today")
     now = datetime.now()
 
@@ -137,12 +118,11 @@ async def _handle_show(update: Update, user_id: int, parsed: dict):
         time_min = now.replace(hour=0, minute=0, second=0)
         time_max = time_min + timedelta(days=7)
         label = "на неделю"
-    else:  # today
+    else:
         time_min = now.replace(hour=0, minute=0, second=0)
         time_max = time_min + timedelta(days=1)
         label = "сегодня"
 
-    # Если указана конкретная дата
     date_str = parsed.get("date")
     if date_str:
         try:
@@ -160,13 +140,12 @@ async def _handle_show(update: Update, user_id: int, parsed: dict):
         return
 
     if not events:
-        await update.message.reply_text(f"📭 На {label} событий нет. Свободен как ветер!")
+        await update.message.reply_text(f"📭 На {label} событий нет. Свободна как ветер!")
         return
 
     lines = [f"📅 **Расписание {label}:**\n"]
     for e in events:
         start = e["start"]
-        # Парсим время из ISO
         try:
             dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             time_fmt = dt.strftime("%H:%M")
@@ -180,14 +159,12 @@ async def _handle_show(update: Update, user_id: int, parsed: dict):
 # ─── Удаление события ─────────────────────────────────────
 
 async def _handle_delete(update: Update, user_id: int, parsed: dict):
-    """Удалить событие — ищем по названию, просим подтвердить."""
     title_query = parsed.get("title", "").lower()
 
     if not title_query:
         await update.message.reply_text("🤔 Какое именно событие удалить?")
         return
 
-    # Ищем события на ближайшую неделю
     now = datetime.now()
     time_min = now.replace(hour=0, minute=0, second=0)
     time_max = time_min + timedelta(days=7)
@@ -198,11 +175,7 @@ async def _handle_delete(update: Update, user_id: int, parsed: dict):
         await update.message.reply_text("📭 Не нашёл событий для удаления.")
         return
 
-    # Ищем совпадение по названию
-    matches = [
-        e for e in events
-        if title_query in e["title"].lower()
-    ]
+    matches = [e for e in events if title_query in e["title"].lower()]
 
     if not matches:
         await update.message.reply_text(
