@@ -3,8 +3,10 @@ Revory - Google Calendar Service
 OAuth через публичный callback URL + CRUD
 """
 
+import json
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,10 +20,20 @@ from services.database import load_google_token, save_google_token
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-CREDENTIALS_FILE = "credentials.json"
 
 # user_id -> Flow (живёт в памяти пока идёт OAuth)
 _pending_flows: dict[int, Flow] = {}
+
+
+def _get_credentials_file() -> str:
+    """Читает credentials из env или файла."""
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
+    if creds_json:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        tmp.write(creds_json)
+        tmp.close()
+        return tmp.name
+    return "credentials.json"
 
 
 def _get_redirect_uri() -> str:
@@ -50,7 +62,7 @@ async def get_credentials(user_id: int) -> Optional[Credentials]:
 def start_auth(user_id: int) -> str:
     """Создаёт OAuth flow и возвращает URL для авторизации."""
     flow = Flow.from_client_secrets_file(
-        CREDENTIALS_FILE,
+        _get_credentials_file(),
         scopes=SCOPES,
         redirect_uri=_get_redirect_uri(),
     )
@@ -74,7 +86,6 @@ async def finish_auth_callback(user_id: int, code: str) -> bool:
         flow.fetch_token(code=code)
         creds = flow.credentials
 
-        import json
         await save_google_token(user_id, json.loads(creds.to_json()))
         del _pending_flows[user_id]
 
