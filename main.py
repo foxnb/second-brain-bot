@@ -1,6 +1,6 @@
 """
-RevMind — Main
-Точка входа: Telegram бот с Google Calendar.
+Revory - Main
+Telegram bot с webhook режимом для продакшена.
 """
 
 import logging
@@ -25,11 +25,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я RevMind — твой личный календарный ассистент 🗓️\n\n"
+        "Привет! Я Revory — твой личный календарный ассистент 🗓️\n\n"
         "Могу:\n"
         "• Создавать встречи — «встреча завтра в 15:00 с клиентом»\n"
         "• Показывать расписание — «что у меня сегодня?»\n"
@@ -41,7 +42,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /auth — начать OAuth-авторизацию Google Calendar."""
     user_id = update.message.from_user.id
     auth_url = start_auth(user_id)
 
@@ -63,11 +63,24 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("auth", cmd_auth))
 
-    # Текстовые сообщения → AI роутер
+    # Текстовые сообщения
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    print("RevMind запущен! 🚀")
-    app.run_polling()
+    # Режим запуска: webhook на сервере, polling локально
+    webhook_url = os.getenv("WEBHOOK_URL")
+    port = int(os.getenv("PORT", "8000"))
+
+    if webhook_url:
+        logger.info(f"Starting webhook on port {port}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="webhook",
+            webhook_url=f"{webhook_url}/webhook",
+        )
+    else:
+        logger.info("Starting polling (local mode)")
+        app.run_polling()
 
 
 if __name__ == "__main__":
