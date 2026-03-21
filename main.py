@@ -136,6 +136,22 @@ async def on_startup(telegram_app: Application):
         logger.info(f"Webhook set: {webhook_url}/webhook")
     await get_pool()
     logger.info("DB pool initialized")
+    
+    # Keep-alive: пингуем себя каждые 5 минут
+    if webhook_url:
+        import asyncio
+        import httpx
+        async def keep_alive():
+            while True:
+                await asyncio.sleep(5 * 60)
+                try:
+                    async with httpx.AsyncClient() as client:
+                        await client.get(f"{webhook_url}/health", timeout=10)
+                    logger.info("Keep-alive ping sent")
+                except Exception as e:
+                    logger.warning(f"Keep-alive failed: {e}")
+        asyncio.create_task(keep_alive())
+        logger.info("Keep-alive started")
 
 
 async def on_shutdown(telegram_app: Application):
