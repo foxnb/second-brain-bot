@@ -9,6 +9,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -46,6 +47,17 @@ async def _get_user_tz(user_id: int) -> str:
     """Возвращает IANA timezone пользователя или дефолт."""
     tz = await load_timezone(user_id)
     return tz or DEFAULT_TZ
+
+
+def _to_rfc3339(dt_naive: datetime, tz_name: str) -> str:
+    """
+    Принимает naive datetime + IANA timezone name,
+    возвращает RFC3339 строку с offset (напр. 2026-03-24T00:00:00+03:00).
+    Google Calendar API гарантированно это принимает.
+    """
+    tz = ZoneInfo(tz_name)
+    dt_aware = dt_naive.replace(tzinfo=tz)
+    return dt_aware.isoformat()
 
 
 async def get_credentials(user_id: int) -> Optional[Credentials]:
@@ -127,8 +139,8 @@ async def create_event(
     event_body = {
         "summary": title,
         "description": description,
-        "start": {"dateTime": start_time.isoformat(), "timeZone": tz},
-        "end": {"dateTime": end_time.isoformat(), "timeZone": tz},
+        "start": {"dateTime": _to_rfc3339(start_time, tz), "timeZone": tz},
+        "end": {"dateTime": _to_rfc3339(end_time, tz), "timeZone": tz},
     }
 
     try:
@@ -164,17 +176,22 @@ async def get_events(
     if not time_max:
         time_max = time_min + timedelta(days=1)
 
+    # RFC3339 с offset — Google Calendar API это точно принимает
+    time_min_str = _to_rfc3339(time_min, tz)
+    time_max_str = _to_rfc3339(time_max, tz)
+
+    logger.info(f"get_events: timeMin={time_min_str}, timeMax={time_max_str}, tz={tz}")
+
     try:
         result = (
             service.events()
             .list(
                 calendarId="primary",
-                timeMin=time_min.isoformat(),
-                timeMax=time_max.isoformat(),
+                timeMin=time_min_str,
+                timeMax=time_max_str,
                 maxResults=max_results,
                 singleEvents=True,
                 orderBy="startTime",
-                timeZone=tz,
             )
             .execute()
         )
