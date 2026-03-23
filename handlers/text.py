@@ -4,7 +4,8 @@ Revory — Text Handler
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -16,8 +17,19 @@ from services.calendar import (
     get_events,
     delete_event,
 )
+from services.database import load_timezone
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TZ = "Europe/Moscow"
+
+
+async def _get_user_now(user_id: int) -> tuple[datetime, str]:
+    """Возвращает (текущее время пользователя, IANA timezone)."""
+    tz_name = await load_timezone(user_id) or DEFAULT_TZ
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    return now, tz_name
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,9 +46,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Отправляем текст в AI ---
+    # --- Получаем timezone пользователя ---
+    user_now, tz_name = await _get_user_now(user_id)
+
+    # --- Отправляем текст в AI (с timezone) ---
     await update.message.chat.send_action("typing")
-    parsed = await parse_message(text)
+    parsed = await parse_message(text, user_now=user_now, tz_name=tz_name)
     intent = parsed.get("intent", "unknown")
 
     logger.info(f"User {user_id} | Intent: {intent} | Parsed: {parsed}")
@@ -46,10 +61,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_create(update, user_id, parsed)
 
     elif intent == "show_events":
-        await _handle_show(update, user_id, parsed)
+        await _handle_show(update, user_id, parsed, user_now)
 
     elif intent == "delete_event":
-        await _handle_delete(update, user_id, parsed)
+        await _handle_delete(update, user_id, parsed, user_now)
 
     elif intent == "remind":
         reply = parsed.get("reply", "Напоминания скоро будут!")
@@ -106,20 +121,19 @@ async def _handle_create(update: Update, user_id: int, parsed: dict):
 
 # ─── Показ событий ────────────────────────────────────────
 
-async def _handle_show(update: Update, user_id: int, parsed: dict):
+async def _handle_show(update: Update, user_id: int, parsed: dict, user_now: datetime):
     period = parsed.get("period", "today")
-    now = datetime.now()
 
     if period == "tomorrow":
-        time_min = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0)
+        time_min = (user_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         time_max = time_min + timedelta(days=1)
         label = "завтра"
     elif period == "week":
-        time_min = now.replace(hour=0, minute=0, second=0)
+        time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_max = time_min + timedelta(days=7)
         label = "на неделю"
     else:
-        time_min = now.replace(hour=0, minute=0, second=0)
+        time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_max = time_min + timedelta(days=1)
         label = "сегодня"
 
@@ -127,13 +141,17 @@ async def _handle_show(update: Update, user_id: int, parsed: dict):
     if date_str:
         try:
             day = datetime.strptime(date_str, "%Y-%m-%d")
-            time_min = day.replace(hour=0, minute=0, second=0)
+            time_min = day.replace(hour=0, minute=0, second=0, tzinfo=user_now.tzinfo)
             time_max = time_min + timedelta(days=1)
             label = day.strftime("%d.%m.%Y")
         except ValueError:
             pass
 
-    events = await get_events(user_id, time_min, time_max)
+    # Убираем tzinfo для передачи в calendar (он сам добавит timezone)
+    time_min_naive = time_min.replace(tzinfo=None)
+    time_max_naive = time_max.replace(tzinfo=None)
+
+    events = await get_events(user_id, time_min_naive, time_max_naive)
 
     if events is None:
         await update.message.reply_text("❌ Ошибка при загрузке событий.")
@@ -158,18 +176,20 @@ async def _handle_show(update: Update, user_id: int, parsed: dict):
 
 # ─── Удаление события ─────────────────────────────────────
 
-async def _handle_delete(update: Update, user_id: int, parsed: dict):
+async def _handle_delete(update: Update, user_id: int, parsed: dict, user_now: datetime):
     title_query = parsed.get("title", "").lower()
 
     if not title_query:
         await update.message.reply_text("🤔 Какое именно событие удалить?")
         return
 
-    now = datetime.now()
-    time_min = now.replace(hour=0, minute=0, second=0)
+    time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
     time_max = time_min + timedelta(days=7)
 
-    events = await get_events(user_id, time_min, time_max, max_results=20)
+    time_min_naive = time_min.replace(tzinfo=None)
+    time_max_naive = time_max.replace(tzinfo=None)
+
+    events = await get_events(user_id, time_min_naive, time_max_naive, max_results=20)
 
     if not events:
         await update.message.reply_text("📭 Не нашёл событий для удаления.")

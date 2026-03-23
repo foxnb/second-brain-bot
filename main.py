@@ -6,13 +6,15 @@ Telegram bot с webhook режимом для продакшена.
 
 import logging
 import os
+import re
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -24,7 +26,7 @@ import uvicorn
 
 from handlers.text import handle_text
 from services.calendar import start_auth, finish_auth_callback
-from services.database import ensure_user, get_pool
+from services.database import ensure_user, save_timezone, load_timezone, get_pool, run_migrations
 
 load_dotenv()
 
@@ -38,20 +40,191 @@ logger = logging.getLogger(__name__)
 _telegram_app = None
 
 
+# ─── Утилита: смещение → IANA timezone ────────────────────
+
+def offset_to_iana(offset_str: str) -> str | None:
+    """
+    Конвертирует "+3", "-5", "+5:30" в IANA timezone.
+    Etc/GMT использует инвертированный знак: +3 → Etc/GMT-3
+    Для дробных (напр. +5:30) возвращает фиксированное название.
+    """
+    # Маппинг для дробных смещений
+    FRACTIONAL = {
+        "+3:30": "Asia/Tehran",
+        "+4:30": "Asia/Kabul",
+        "+5:30": "Asia/Kolkata",
+        "+5:45": "Asia/Kathmandu",
+        "+6:30": "Asia/Yangon",
+        "+9:30": "Australia/Darwin",
+        "-3:30": "America/St_Johns",
+        "-9:30": "Pacific/Marquesas",
+    }
+
+    offset_str = offset_str.strip().replace("UTC", "").replace("utc", "")
+
+    if offset_str in FRACTIONAL:
+        return FRACTIONAL[offset_str]
+
+    # Парсим целое число
+    match = re.match(r'^([+-]?)(\d{1,2})$', offset_str)
+    if not match:
+        return None
+
+    sign = match.group(1) or "+"
+    hours = int(match.group(2))
+
+    if hours > 14:
+        return None
+
+    # Etc/GMT инвертирует знак: UTC+3 = Etc/GMT-3
+    if sign == "-":
+        return f"Etc/GMT+{hours}"
+    else:
+        return f"Etc/GMT-{hours}" if hours != 0 else "Etc/GMT"
+
+
+def iana_to_display(tz: str) -> str:
+    """Красивое отображение timezone для пользователя."""
+    if tz == "Europe/Moscow":
+        return "Москва (UTC+3)"
+    if tz.startswith("Etc/GMT"):
+        # Etc/GMT-3 → UTC+3, Etc/GMT+5 → UTC-5 (инвертированный знак)
+        rest = tz.replace("Etc/GMT", "")
+        if rest == "" or rest == "0":
+            return "UTC±0"
+        if rest.startswith("-"):
+            return f"UTC+{rest[1:]}"
+        if rest.startswith("+"):
+            return f"UTC-{rest[1:]}"
+    # Для именованных (Asia/Kolkata и т.д.) — показываем как есть
+    return tz
+
+
+# ─── /start ───────────────────────────────────────────────
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     await ensure_user(user.id, user.username)
-    await update.message.reply_text(
-        "Привет! Я Revory — твой личный календарный ассистент 🗓️\n\n"
+
+    # Проверяем, установлен ли timezone
+    tz = await load_timezone(user.id)
+    if tz:
+        # Уже есть timezone — просто приветствие
+        await _send_welcome(update)
+    else:
+        # Первый раз — спрашиваем timezone
+        keyboard = [
+            [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+            [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
+        ]
+        await update.message.reply_text(
+            "Привет! Я Revory — твой личный календарный ассистент 🗓️\n\n"
+            "Для начала — какой у тебя часовой пояс?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def _send_welcome(update_or_query):
+    """Отправляет приветственное сообщение."""
+    text = (
+        "🗓️ Я Revory — твой личный календарный ассистент!\n\n"
         "Могу:\n"
         "• Создавать встречи — «встреча завтра в 15:00 с клиентом»\n"
         "• Показывать расписание — «что у меня сегодня?»\n"
         "• Удалять события — «удали встречу с клиентом»\n"
         "• Ставить напоминания — «напомни в 10 утра купить продукты»\n\n"
-        "Для начала подключи календарь: /auth\n"
-        "Потом просто пиши как думаешь!"
+        "Подключи календарь: /auth\n"
+        "Сменить часовой пояс: /timezone\n\n"
+        "Просто пиши как думаешь!"
+    )
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        await update_or_query.message.reply_text(text)
+    elif hasattr(update_or_query, "edit_message_text"):
+        await update_or_query.edit_message_text(text)
+
+
+# ─── Callback для кнопок timezone ─────────────────────────
+
+async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    user_id = query.from_user.id
+
+    if data.startswith("tz_set:"):
+        # Установить конкретный timezone
+        tz = data.split(":", 1)[1]
+        await save_timezone(user_id, tz)
+        display = iana_to_display(tz)
+        await query.edit_message_text(
+            f"✅ Часовой пояс установлен: {display}\n\n"
+            "Теперь подключи календарь: /auth"
+        )
+
+    elif data == "tz_ask_custom":
+        # Просим ввести смещение
+        context.user_data["awaiting_timezone"] = True
+        await query.edit_message_text(
+            "🌍 Введи своё смещение от UTC.\n\n"
+            "Примеры: +3, -5, +5:30, 0\n\n"
+            "Не знаешь своё смещение? Погугли «мой часовой пояс UTC»."
+        )
+
+
+# ─── Обработка ввода timezone ─────────────────────────────
+
+async def handle_timezone_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Если пользователь в режиме ввода timezone — обрабатываем.
+    Возвращает True если обработано, False если нет.
+    """
+    if not context.user_data.get("awaiting_timezone"):
+        return False
+
+    text = update.message.text.strip()
+    tz = offset_to_iana(text)
+
+    if not tz:
+        await update.message.reply_text(
+            "❌ Не понял формат. Введи смещение как: +3, -5, +5:30, 0"
+        )
+        return True
+
+    user_id = update.message.from_user.id
+    await save_timezone(user_id, tz)
+    context.user_data["awaiting_timezone"] = False
+
+    display = iana_to_display(tz)
+    await update.message.reply_text(
+        f"✅ Часовой пояс установлен: {display}\n\n"
+        "Теперь подключи календарь: /auth"
+    )
+    return True
+
+
+# ─── /timezone (смена timezone) ───────────────────────────
+
+async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    current_tz = await load_timezone(user_id)
+
+    msg = ""
+    if current_tz:
+        display = iana_to_display(current_tz)
+        msg = f"Текущий часовой пояс: {display}\n\n"
+
+    keyboard = [
+        [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+        [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
+    ]
+    await update.message.reply_text(
+        msg + "Выбери часовой пояс:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
+# ─── /auth ────────────────────────────────────────────────
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -66,6 +239,8 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ничего копировать не нужно!"
     )
 
+
+# ─── OAuth callback ───────────────────────────────────────
 
 async def auth_callback(request: Request):
     """Google OAuth callback — GET /auth/callback?code=...&state=user_id"""
@@ -83,7 +258,6 @@ async def auth_callback(request: Request):
     success = await finish_auth_callback(user_id, code)
 
     if success:
-        # Отправляем сообщение пользователю в Telegram
         if _telegram_app:
             try:
                 await _telegram_app.bot.send_message(
@@ -109,8 +283,36 @@ async def health(request: Request):
     return HTMLResponse("ok")
 
 
+# ─── Обёртка для text handler с проверкой timezone ────────
+
+async def handle_text_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет timezone ввод, потом проверяет наличие timezone, потом передаёт в text handler."""
+    # 1. Если ожидаем ввод timezone — обрабатываем
+    handled = await handle_timezone_input(update, context)
+    if handled:
+        return
+
+    # 2. Проверяем что timezone установлен
+    user_id = update.message.from_user.id
+    tz = await load_timezone(user_id)
+    if not tz:
+        keyboard = [
+            [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+            [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
+        ]
+        await update.message.reply_text(
+            "⏰ Сначала установи часовой пояс:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # 3. Всё ок — передаём в основной обработчик
+    await handle_text(update, context)
+
+
+# ─── Starlette app ────────────────────────────────────────
+
 def build_starlette_app(telegram_app: Application) -> Starlette:
-    """Собирает Starlette app с webhook + OAuth callback."""
     webhook_path = "/webhook"
 
     async def telegram_webhook(request: Request):
@@ -130,14 +332,18 @@ def build_starlette_app(telegram_app: Application) -> Starlette:
 
 async def on_startup(telegram_app: Application):
     await telegram_app.initialize()
+
+    # Миграции БД
+    await get_pool()
+    await run_migrations()
+    logger.info("DB pool initialized, migrations done")
+
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
         await telegram_app.bot.set_webhook(f"{webhook_url}/webhook")
         logger.info(f"Webhook set: {webhook_url}/webhook")
-    await get_pool()
-    logger.info("DB pool initialized")
-    
-    # Keep-alive: пингуем себя каждые 5 минут
+
+    # Keep-alive
     if webhook_url:
         import asyncio
         import httpx
@@ -170,12 +376,13 @@ def main():
     # Команды
     _telegram_app.add_handler(CommandHandler("start", cmd_start))
     _telegram_app.add_handler(CommandHandler("auth", cmd_auth))
+    _telegram_app.add_handler(CommandHandler("timezone", cmd_timezone))
+    _telegram_app.add_handler(CallbackQueryHandler(tz_callback, pattern=r"^tz_"))
     _telegram_app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper)
     )
 
     if webhook_url:
-        # Продакшен: Starlette + uvicorn
         starlette_app = build_starlette_app(_telegram_app)
 
         import asyncio
@@ -191,7 +398,6 @@ def main():
 
         asyncio.run(run())
     else:
-        # Локально: polling
         logger.info("Starting polling (local mode)")
         _telegram_app.run_polling()
 

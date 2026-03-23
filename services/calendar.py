@@ -15,11 +15,12 @@ from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-from services.database import load_google_token, save_google_token
+from services.database import load_google_token, save_google_token, load_timezone
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+DEFAULT_TZ = "Europe/Moscow"
 
 # user_id -> Flow (живёт в памяти пока идёт OAuth)
 _pending_flows: dict[int, Flow] = {}
@@ -39,6 +40,12 @@ def _get_credentials_file() -> str:
 def _get_redirect_uri() -> str:
     base = os.getenv("WEBHOOK_URL", "http://localhost:8000")
     return f"{base}/auth/callback"
+
+
+async def _get_user_tz(user_id: int) -> str:
+    """Возвращает IANA timezone пользователя или дефолт."""
+    tz = await load_timezone(user_id)
+    return tz or DEFAULT_TZ
 
 
 async def get_credentials(user_id: int) -> Optional[Credentials]:
@@ -76,7 +83,7 @@ def start_auth(user_id: int) -> str:
 
 
 async def finish_auth_callback(user_id: int, code: str) -> bool:
-    """Завершает OAuth flow после редиректа. Вызывается из /auth/callback."""
+    """Завершает OAuth flow после редиректа."""
     flow = _pending_flows.get(user_id)
     if not flow:
         logger.error(f"No pending flow for user {user_id}")
@@ -85,13 +92,10 @@ async def finish_auth_callback(user_id: int, code: str) -> bool:
     try:
         flow.fetch_token(code=code)
         creds = flow.credentials
-
         await save_google_token(user_id, json.loads(creds.to_json()))
         del _pending_flows[user_id]
-
         logger.info(f"Auth done for user {user_id}")
         return True
-
     except Exception as e:
         logger.error(f"Auth error for {user_id}: {e}")
         return False
@@ -118,11 +122,13 @@ async def create_event(
     if not end_time:
         end_time = start_time + timedelta(hours=1)
 
+    tz = await _get_user_tz(user_id)
+
     event_body = {
         "summary": title,
         "description": description,
-        "start": {"dateTime": start_time.isoformat(), "timeZone": "Europe/Moscow"},
-        "end": {"dateTime": end_time.isoformat(), "timeZone": "Europe/Moscow"},
+        "start": {"dateTime": start_time.isoformat(), "timeZone": tz},
+        "end": {"dateTime": end_time.isoformat(), "timeZone": tz},
     }
 
     try:
@@ -150,6 +156,8 @@ async def get_events(
     if not service:
         return None
 
+    tz = await _get_user_tz(user_id)
+
     now = datetime.now()
     if not time_min:
         time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -161,11 +169,12 @@ async def get_events(
             service.events()
             .list(
                 calendarId="primary",
-                timeMin=time_min.isoformat() + "+03:00",
-                timeMax=time_max.isoformat() + "+03:00",
+                timeMin=time_min.isoformat(),
+                timeMax=time_max.isoformat(),
                 maxResults=max_results,
                 singleEvents=True,
                 orderBy="startTime",
+                timeZone=tz,
             )
             .execute()
         )

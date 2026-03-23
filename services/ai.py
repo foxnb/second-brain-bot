@@ -15,8 +15,9 @@ MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
 SYSTEM_PROMPT = """Ты - AI-ассистент Revory. Твоя задача - понять намерение пользователя и извлечь параметры.
 
-Текущая дата и время: {current_time}
+Текущая дата и время пользователя: {current_time}
 День недели: {weekday}
+Часовой пояс пользователя: {timezone}
 
 Верни ТОЛЬКО JSON (без markdown, без ```), строго по формату:
 
@@ -42,6 +43,7 @@ SYSTEM_PROMPT = """Ты - AI-ассистент Revory. Твоя задача - 
 - "напомни про встречу завтра в 9:00" = intent=remind, title="Встреча", time="09:00"
 - Ключевые слова для remind: "напомни", "напоминание", "не забудь", "remind"
 - Ключевые слова для create_event: "создай", "добавь", "запланируй", "поставь встречу"
+- Если пользователь указывает другой часовой пояс ("в 12 по мск", "в 10 по киеву") — пересчитай время в часовой пояс пользователя ({timezone}) и верни пересчитанное время
 - Если не понял - intent="unknown", в reply объясни что не так
 - reply должен быть дружелюбным и коротким
 """
@@ -61,13 +63,20 @@ def _get_client() -> Together:
     return _client
 
 
-async def parse_message(text: str) -> dict:
-    now = datetime.now()
-    weekday = WEEKDAYS_RU[now.weekday()]
+async def parse_message(
+    text: str,
+    user_now: datetime | None = None,
+    tz_name: str = "Europe/Moscow",
+) -> dict:
+    if user_now is None:
+        user_now = datetime.now()
+
+    weekday = WEEKDAYS_RU[user_now.weekday()]
 
     system = SYSTEM_PROMPT.format(
-        current_time=now.strftime("%Y-%m-%d %H:%M"),
+        current_time=user_now.strftime("%Y-%m-%d %H:%M"),
         weekday=weekday,
+        timezone=tz_name,
     )
 
     try:

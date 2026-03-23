@@ -23,6 +23,18 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+async def run_migrations():
+    """Автомиграции — добавляет недостающие колонки."""
+    pool = await get_pool()
+    # Добавляем колонку timezone если её нет
+    await pool.execute(
+        """
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT NULL
+        """
+    )
+    logger.info("Migrations done")
+
+
 async def ensure_user(user_id: int, username: Optional[str] = None):
     """Создаёт пользователя если не существует."""
     pool = await get_pool()
@@ -58,4 +70,26 @@ async def load_google_token(user_id: int) -> Optional[dict]:
     )
     if row and row["google_token"]:
         return json.loads(row["google_token"])
+    return None
+
+
+async def save_timezone(user_id: int, timezone: str):
+    """Сохраняет часовой пояс пользователя."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET timezone = $1 WHERE user_id = $2",
+        timezone,
+        user_id,
+    )
+    logger.info(f"Saved timezone {timezone} for user {user_id}")
+
+
+async def load_timezone(user_id: int) -> Optional[str]:
+    """Загружает часовой пояс пользователя. None = не установлен."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT timezone FROM users WHERE user_id = $1", user_id
+    )
+    if row and row["timezone"]:
+        return row["timezone"]
     return None
