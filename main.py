@@ -42,28 +42,60 @@ _telegram_app = None
 
 # ─── Утилита: смещение → IANA timezone ────────────────────
 
+# Маппинг целочисленных UTC-смещений в нормальные IANA зоны.
+# Google Calendar API принимает эти зоны без проблем.
+_OFFSET_TO_IANA = {
+    -12: "Etc/GMT+12",
+    -11: "Pacific/Pago_Pago",
+    -10: "Pacific/Honolulu",
+    -9: "America/Anchorage",
+    -8: "America/Los_Angeles",
+    -7: "America/Denver",
+    -6: "America/Chicago",
+    -5: "America/New_York",
+    -4: "America/Halifax",
+    -3: "America/Sao_Paulo",
+    -2: "Atlantic/South_Georgia",
+    -1: "Atlantic/Azores",
+    0: "Etc/GMT",
+    1: "Europe/London",      # CET в зимнее, но для offset +1 нормально
+    2: "Europe/Berlin",
+    3: "Europe/Moscow",
+    4: "Asia/Dubai",
+    5: "Asia/Karachi",
+    6: "Asia/Almaty",
+    7: "Asia/Bangkok",
+    8: "Asia/Shanghai",
+    9: "Asia/Tokyo",
+    10: "Australia/Sydney",
+    11: "Pacific/Noumea",
+    12: "Pacific/Auckland",
+    13: "Pacific/Apia",
+    14: "Pacific/Kiritimati",
+}
+
+# Дробные смещения
+_FRACTIONAL_TO_IANA = {
+    "+3:30": "Asia/Tehran",
+    "+4:30": "Asia/Kabul",
+    "+5:30": "Asia/Kolkata",
+    "+5:45": "Asia/Kathmandu",
+    "+6:30": "Asia/Yangon",
+    "+9:30": "Australia/Darwin",
+    "-3:30": "America/St_Johns",
+    "-9:30": "Pacific/Marquesas",
+}
+
+
 def offset_to_iana(offset_str: str) -> str | None:
     """
     Конвертирует "+3", "-5", "+5:30" в IANA timezone.
-    Etc/GMT использует инвертированный знак: +3 → Etc/GMT-3
-    Для дробных (напр. +5:30) возвращает фиксированное название.
+    Использует реальные географические зоны, а не Etc/GMT.
     """
-    # Маппинг для дробных смещений
-    FRACTIONAL = {
-        "+3:30": "Asia/Tehran",
-        "+4:30": "Asia/Kabul",
-        "+5:30": "Asia/Kolkata",
-        "+5:45": "Asia/Kathmandu",
-        "+6:30": "Asia/Yangon",
-        "+9:30": "Australia/Darwin",
-        "-3:30": "America/St_Johns",
-        "-9:30": "Pacific/Marquesas",
-    }
-
     offset_str = offset_str.strip().replace("UTC", "").replace("utc", "")
 
-    if offset_str in FRACTIONAL:
-        return FRACTIONAL[offset_str]
+    if offset_str in _FRACTIONAL_TO_IANA:
+        return _FRACTIONAL_TO_IANA[offset_str]
 
     # Парсим целое число
     match = re.match(r'^([+-]?)(\d{1,2})$', offset_str)
@@ -72,31 +104,26 @@ def offset_to_iana(offset_str: str) -> str | None:
 
     sign = match.group(1) or "+"
     hours = int(match.group(2))
+    offset_int = hours if sign == "+" else -hours
 
-    if hours > 14:
-        return None
-
-    # Etc/GMT инвертирует знак: UTC+3 = Etc/GMT-3
-    if sign == "-":
-        return f"Etc/GMT+{hours}"
-    else:
-        return f"Etc/GMT-{hours}" if hours != 0 else "Etc/GMT"
+    return _OFFSET_TO_IANA.get(offset_int)
 
 
 def iana_to_display(tz: str) -> str:
     """Красивое отображение timezone для пользователя."""
-    if tz == "Europe/Moscow":
-        return "Москва (UTC+3)"
-    if tz.startswith("Etc/GMT"):
-        # Etc/GMT-3 → UTC+3, Etc/GMT+5 → UTC-5 (инвертированный знак)
-        rest = tz.replace("Etc/GMT", "")
-        if rest == "" or rest == "0":
-            return "UTC±0"
-        if rest.startswith("-"):
-            return f"UTC+{rest[1:]}"
-        if rest.startswith("+"):
-            return f"UTC-{rest[1:]}"
-    # Для именованных (Asia/Kolkata и т.д.) — показываем как есть
+    # Ищем в маппинге обратно
+    for offset, zone in _OFFSET_TO_IANA.items():
+        if zone == tz:
+            if offset == 0:
+                return "UTC±0"
+            sign = "+" if offset > 0 else ""
+            return f"UTC{sign}{offset}"
+
+    # Для дробных
+    for offset_str, zone in _FRACTIONAL_TO_IANA.items():
+        if zone == tz:
+            return f"UTC{offset_str}"
+
     return tz
 
 
@@ -109,12 +136,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, установлен ли timezone
     tz = await load_timezone(user.id)
     if tz:
-        # Уже есть timezone — просто приветствие
         await _send_welcome(update)
     else:
-        # Первый раз — спрашиваем timezone
         keyboard = [
-            [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+            [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
             [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
         ]
         await update.message.reply_text(
@@ -153,7 +178,6 @@ async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if data.startswith("tz_set:"):
-        # Установить конкретный timezone
         tz = data.split(":", 1)[1]
         await save_timezone(user_id, tz)
         display = iana_to_display(tz)
@@ -163,7 +187,6 @@ async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "tz_ask_custom":
-        # Просим ввести смещение
         context.user_data["awaiting_timezone"] = True
         await query.edit_message_text(
             "🌍 Введи своё смещение от UTC.\n\n"
@@ -215,7 +238,7 @@ async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"Текущий часовой пояс: {display}\n\n"
 
     keyboard = [
-        [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+        [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
         [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
     ]
     await update.message.reply_text(
@@ -287,17 +310,15 @@ async def health(request: Request):
 
 async def handle_text_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверяет timezone ввод, потом проверяет наличие timezone, потом передаёт в text handler."""
-    # 1. Если ожидаем ввод timezone — обрабатываем
     handled = await handle_timezone_input(update, context)
     if handled:
         return
 
-    # 2. Проверяем что timezone установлен
     user_id = update.message.from_user.id
     tz = await load_timezone(user_id)
     if not tz:
         keyboard = [
-            [InlineKeyboardButton("🇷🇺 Москва (+3)", callback_data="tz_set:Europe/Moscow")],
+            [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
             [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
         ]
         await update.message.reply_text(
@@ -306,7 +327,6 @@ async def handle_text_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # 3. Всё ок — передаём в основной обработчик
     await handle_text(update, context)
 
 
