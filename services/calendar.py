@@ -1,6 +1,7 @@
 """
-Revory - Google Calendar Service
+Revory - Google Calendar Service (Schema v9)
 OAuth через публичный callback URL + CRUD
+Работает с calendar_connections вместо google_token в users
 """
 
 import json
@@ -9,6 +10,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 from typing import Optional
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
@@ -16,14 +18,20 @@ from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-from services.database import load_google_token, save_google_token, load_timezone
+from services.database import (
+    load_calendar_connection,
+    save_calendar_connection,
+    update_calendar_tokens,
+    load_timezone,
+)
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 DEFAULT_TZ = "Europe/Moscow"
 
-# user_id -> Flow (живёт в памяти пока идёт OAuth)
+# telegram_id -> Flow (живёт в памяти пока идёт OAuth)
+# Ключ — telegram_id (не UUID), т.к. state в OAuth = telegram_id
 _pending_flows: dict[int, Flow] = {}
 
 
@@ -43,7 +51,7 @@ def _get_redirect_uri() -> str:
     return f"{base}/auth/callback"
 
 
-async def _get_user_tz(user_id: int) -> str:
+async def _get_user_tz(user_id: UUID) -> str:
     """Возвращает IANA timezone пользователя или дефолт."""
     tz = await load_timezone(user_id)
     return tz or DEFAULT_TZ
@@ -52,34 +60,40 @@ async def _get_user_tz(user_id: int) -> str:
 def _to_rfc3339(dt_naive: datetime, tz_name: str) -> str:
     """
     Принимает naive datetime + IANA timezone name,
-    возвращает RFC3339 строку с offset (напр. 2026-03-24T00:00:00+03:00).
-    Google Calendar API гарантированно это принимает.
+    возвращает RFC3339 строку с offset.
     """
     tz = ZoneInfo(tz_name)
     dt_aware = dt_naive.replace(tzinfo=tz)
     return dt_aware.isoformat()
 
 
-async def get_credentials(user_id: int) -> Optional[Credentials]:
-    token_data = await load_google_token(user_id)
-    if not token_data:
+async def get_credentials(user_id: UUID) -> Optional[Credentials]:
+    """Загружает Google credentials из calendar_connections."""
+    conn_data = await load_calendar_connection(user_id, provider="google")
+    if not conn_data:
         return None
+
+    token_data = conn_data["token_data"]
+    connection_id = conn_data["id"]
 
     creds = Credentials.from_authorized_user_info(token_data, SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            await save_google_token(user_id, json.loads(creds.to_json()))
+            await update_calendar_tokens(connection_id, json.loads(creds.to_json()))
         except Exception as e:
-            logger.error(f"Token refresh error for {user_id}: {e}")
+            logger.error(f"Token refresh error for user {user_id}: {e}")
             return None
 
     return creds
 
 
-def start_auth(user_id: int) -> str:
-    """Создаёт OAuth flow и возвращает URL для авторизации."""
+def start_auth(telegram_id: int) -> str:
+    """
+    Создаёт OAuth flow и возвращает URL для авторизации.
+    state = telegram_id (для callback).
+    """
     flow = Flow.from_client_secrets_file(
         _get_credentials_file(),
         scopes=SCOPES,
@@ -88,32 +102,57 @@ def start_auth(user_id: int) -> str:
     auth_url, _ = flow.authorization_url(
         prompt="consent",
         access_type="offline",
-        state=str(user_id),
+        state=str(telegram_id),
     )
-    _pending_flows[user_id] = flow
+    _pending_flows[telegram_id] = flow
     return auth_url
 
 
-async def finish_auth_callback(user_id: int, code: str) -> bool:
-    """Завершает OAuth flow после редиректа."""
-    flow = _pending_flows.get(user_id)
+async def finish_auth_callback(
+    user_id: UUID,
+    telegram_id: int,
+    code: str,
+) -> bool:
+    """
+    Завершает OAuth flow после редиректа.
+    Сохраняет токены в calendar_connections.
+    """
+    flow = _pending_flows.get(telegram_id)
     if not flow:
-        logger.error(f"No pending flow for user {user_id}")
+        logger.error(f"No pending flow for telegram {telegram_id}")
         return False
 
     try:
         flow.fetch_token(code=code)
         creds = flow.credentials
-        await save_google_token(user_id, json.loads(creds.to_json()))
-        del _pending_flows[user_id]
-        logger.info(f"Auth done for user {user_id}")
+        token_data = json.loads(creds.to_json())
+
+        # Пытаемся получить email из Google
+        provider_email = None
+        try:
+            from googleapiclient.discovery import build as build_svc
+            svc = build_svc("oauth2", "v2", credentials=creds)
+            user_info = svc.userinfo().get().execute()
+            provider_email = user_info.get("email")
+        except Exception as e:
+            logger.warning(f"Could not fetch Google email: {e}")
+
+        await save_calendar_connection(
+            user_id=user_id,
+            provider="google",
+            token_data=token_data,
+            provider_email=provider_email,
+        )
+
+        del _pending_flows[telegram_id]
+        logger.info(f"Google auth done for user {user_id} (tg={telegram_id})")
         return True
     except Exception as e:
-        logger.error(f"Auth error for {user_id}: {e}")
+        logger.error(f"Auth error for telegram {telegram_id}: {e}")
         return False
 
 
-async def _get_service(user_id: int):
+async def _get_service(user_id: UUID):
     creds = await get_credentials(user_id)
     if not creds:
         return None
@@ -121,7 +160,7 @@ async def _get_service(user_id: int):
 
 
 async def create_event(
-    user_id: int,
+    user_id: UUID,
     title: str,
     start_time: datetime,
     end_time: Optional[datetime] = None,
@@ -159,7 +198,7 @@ async def create_event(
 
 
 async def get_events(
-    user_id: int,
+    user_id: UUID,
     time_min: Optional[datetime] = None,
     time_max: Optional[datetime] = None,
     max_results: int = 10,
@@ -176,7 +215,6 @@ async def get_events(
     if not time_max:
         time_max = time_min + timedelta(days=1)
 
-    # RFC3339 с offset — Google Calendar API это точно принимает
     time_min_str = _to_rfc3339(time_min, tz)
     time_max_str = _to_rfc3339(time_max, tz)
 
@@ -210,7 +248,7 @@ async def get_events(
         return None
 
 
-async def delete_event(user_id: int, event_id: str) -> bool:
+async def delete_event(user_id: UUID, event_id: str) -> bool:
     service = await _get_service(user_id)
     if not service:
         return False

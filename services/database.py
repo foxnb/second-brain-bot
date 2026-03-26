@@ -1,5 +1,6 @@
 """
-Revory - Database Service
+Revory - Database Service (Schema v9)
+UUID users + auth_methods + calendar_connections
 Supabase (PostgreSQL) через asyncpg
 """
 
@@ -7,6 +8,7 @@ import json
 import logging
 import os
 from typing import Optional
+from uuid import UUID
 
 import asyncpg
 
@@ -23,73 +25,267 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-async def run_migrations():
-    """Автомиграции — добавляет недостающие колонки."""
-    pool = await get_pool()
-    # Добавляем колонку timezone если её нет
-    await pool.execute(
-        """
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT NULL
-        """
-    )
-    logger.info("Migrations done")
+# ─── Users + Auth ─────────────────────────────────────────
 
-
-async def ensure_user(user_id: int, username: Optional[str] = None):
-    """Создаёт пользователя если не существует."""
+async def ensure_user(
+    telegram_id: int,
+    username: Optional[str] = None,
+    display_name: Optional[str] = None,
+) -> UUID:
+    """
+    Находит или создаёт пользователя по Telegram ID.
+    Возвращает внутренний UUID user_id.
+    """
     pool = await get_pool()
-    await pool.execute(
+
+    # 1. Ищем существующий auth_method
+    row = await pool.fetchrow(
         """
-        INSERT INTO users (user_id, telegram_username)
-        VALUES ($1, $2)
-        ON CONFLICT (user_id) DO NOTHING
+        SELECT user_id FROM auth_methods
+        WHERE provider = 'telegram' AND provider_user_id = $1
         """,
-        user_id,
-        username,
+        str(telegram_id),
     )
 
+    if row:
+        return row["user_id"]
 
-async def save_google_token(user_id: int, token_data: dict):
-    """Сохраняет Google OAuth токен в БД."""
-    pool = await get_pool()
-    await pool.execute(
-        """
-        UPDATE users SET google_token = $1 WHERE user_id = $2
-        """,
-        json.dumps(token_data),
-        user_id,
-    )
-    logger.info(f"Saved Google token for user {user_id}")
+    # 2. Создаём нового пользователя + auth_method в транзакции
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            name = display_name or username or f"User {telegram_id}"
+            user_row = await conn.fetchrow(
+                """
+                INSERT INTO users (display_name)
+                VALUES ($1)
+                RETURNING id
+                """,
+                name,
+            )
+            user_id = user_row["id"]
+
+            metadata = {}
+            if username:
+                metadata["username"] = f"@{username}"
+
+            await conn.execute(
+                """
+                INSERT INTO auth_methods (user_id, provider, provider_user_id, metadata)
+                VALUES ($1, 'telegram', $2, $3)
+                """,
+                user_id,
+                str(telegram_id),
+                json.dumps(metadata) if metadata else None,
+            )
+
+    logger.info(f"Created user {user_id} for telegram {telegram_id}")
+    return user_id
 
 
-async def load_google_token(user_id: int) -> Optional[dict]:
-    """Загружает Google OAuth токен из БД."""
+async def get_user_id_by_telegram(telegram_id: int) -> Optional[UUID]:
+    """Получает UUID пользователя по Telegram ID. None если не найден."""
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT google_token FROM users WHERE user_id = $1", user_id
+        """
+        SELECT user_id FROM auth_methods
+        WHERE provider = 'telegram' AND provider_user_id = $1
+        """,
+        str(telegram_id),
     )
-    if row and row["google_token"]:
-        return json.loads(row["google_token"])
-    return None
+    return row["user_id"] if row else None
 
 
-async def save_timezone(user_id: int, timezone: str):
+# ─── Timezone ─────────────────────────────────────────────
+
+async def save_timezone(user_id: UUID, timezone: str):
     """Сохраняет часовой пояс пользователя."""
     pool = await get_pool()
     await pool.execute(
-        "UPDATE users SET timezone = $1 WHERE user_id = $2",
+        "UPDATE users SET timezone = $1 WHERE id = $2",
         timezone,
         user_id,
     )
     logger.info(f"Saved timezone {timezone} for user {user_id}")
 
 
-async def load_timezone(user_id: int) -> Optional[str]:
-    """Загружает часовой пояс пользователя. None = не установлен."""
+async def load_timezone(user_id: UUID) -> Optional[str]:
+    """Загружает часовой пояс пользователя."""
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT timezone FROM users WHERE user_id = $1", user_id
+        "SELECT timezone FROM users WHERE id = $1",
+        user_id,
     )
-    if row and row["timezone"]:
-        return row["timezone"]
-    return None
+    return row["timezone"] if row and row["timezone"] else None
+
+
+async def load_timezone_by_telegram(telegram_id: int) -> Optional[str]:
+    """Загружает timezone по Telegram ID (для удобства в хэндлерах)."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT u.timezone FROM users u
+        JOIN auth_methods am ON u.id = am.user_id
+        WHERE am.provider = 'telegram' AND am.provider_user_id = $1
+        """,
+        str(telegram_id),
+    )
+    return row["timezone"] if row and row["timezone"] else None
+
+
+# ─── Calendar Connections ─────────────────────────────────
+
+async def save_calendar_connection(
+    user_id: UUID,
+    provider: str,
+    token_data: dict,
+    provider_email: Optional[str] = None,
+) -> int:
+    """
+    Сохраняет или обновляет подключение календаря.
+    Если первое подключение — автоматически is_primary=TRUE.
+    Возвращает connection_id.
+    """
+    pool = await get_pool()
+
+    # TODO: шифровать токены через Fernet (ENCRYPTION_KEY)
+    # Пока храним как есть — добавим шифрование отдельным шагом
+    token_json = json.dumps(token_data)
+    refresh_token = token_data.get("refresh_token")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Проверяем, есть ли уже подключения
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1",
+                user_id,
+            )
+            is_primary = count == 0  # Первое подключение = primary
+
+            # Upsert: если уже есть такой провайдер+email — обновляем токены
+            row = await conn.fetchrow(
+                """
+                INSERT INTO calendar_connections
+                    (user_id, provider, provider_email, access_token_encrypted,
+                     refresh_token_encrypted, is_primary, status)
+                VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                ON CONFLICT (user_id, provider, provider_email)
+                DO UPDATE SET
+                    access_token_encrypted = EXCLUDED.access_token_encrypted,
+                    refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+                    status = 'active',
+                    updated_at = now()
+                RETURNING id
+                """,
+                user_id,
+                provider,
+                provider_email,
+                token_json,
+                refresh_token,
+                is_primary,
+            )
+
+    connection_id = row["id"]
+    logger.info(f"Saved {provider} calendar for user {user_id} (conn={connection_id}, primary={is_primary})")
+    return connection_id
+
+
+async def load_calendar_connection(
+    user_id: UUID,
+    provider: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Загружает подключение календаря.
+    Если provider не указан — возвращает primary.
+    """
+    pool = await get_pool()
+
+    if provider:
+        row = await pool.fetchrow(
+            """
+            SELECT id, provider, provider_email, access_token_encrypted,
+                   refresh_token_encrypted, calendar_id, is_primary, status
+            FROM calendar_connections
+            WHERE user_id = $1 AND provider = $2 AND status = 'active'
+            ORDER BY is_primary DESC
+            LIMIT 1
+            """,
+            user_id,
+            provider,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            SELECT id, provider, provider_email, access_token_encrypted,
+                   refresh_token_encrypted, calendar_id, is_primary, status
+            FROM calendar_connections
+            WHERE user_id = $1 AND status = 'active'
+            ORDER BY is_primary DESC
+            LIMIT 1
+            """,
+            user_id,
+        )
+
+    if not row:
+        return None
+
+    return {
+        "id": row["id"],
+        "provider": row["provider"],
+        "provider_email": row["provider_email"],
+        "token_data": json.loads(row["access_token_encrypted"]),
+        "refresh_token": row["refresh_token_encrypted"],
+        "calendar_id": row["calendar_id"],
+        "is_primary": row["is_primary"],
+    }
+
+
+async def load_all_calendar_connections(user_id: UUID) -> list[dict]:
+    """Все активные подключения пользователя."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, provider, provider_email, is_primary, status
+        FROM calendar_connections
+        WHERE user_id = $1 AND status = 'active'
+        ORDER BY is_primary DESC, connected_at
+        """,
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def update_calendar_tokens(connection_id: int, token_data: dict):
+    """Обновляет токены для существующего подключения."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE calendar_connections
+        SET access_token_encrypted = $1, updated_at = now()
+        WHERE id = $2
+        """,
+        json.dumps(token_data),
+        connection_id,
+    )
+
+
+async def switch_primary_calendar(user_id: UUID, connection_id: int) -> bool:
+    """Переключает primary календарь."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Снимаем primary со всех
+            await conn.execute(
+                "UPDATE calendar_connections SET is_primary = FALSE WHERE user_id = $1",
+                user_id,
+            )
+            # Ставим на нужный
+            result = await conn.execute(
+                """
+                UPDATE calendar_connections
+                SET is_primary = TRUE
+                WHERE id = $1 AND user_id = $2 AND status = 'active'
+                """,
+                connection_id,
+                user_id,
+            )
+    return "UPDATE 1" in result

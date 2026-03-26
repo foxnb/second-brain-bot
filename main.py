@@ -1,5 +1,5 @@
 """
-Revory - Main
+Revory - Main (Schema v9)
 Telegram bot с webhook режимом для продакшена.
 /auth/callback — endpoint для Google OAuth редиректа.
 """
@@ -26,7 +26,14 @@ import uvicorn
 
 from handlers.text import handle_text
 from services.calendar import start_auth, finish_auth_callback
-from services.database import ensure_user, save_timezone, load_timezone, get_pool, run_migrations
+from services.database import (
+    ensure_user,
+    get_user_id_by_telegram,
+    save_timezone,
+    load_timezone,
+    load_timezone_by_telegram,
+    get_pool,
+)
 
 load_dotenv()
 
@@ -42,8 +49,6 @@ _telegram_app = None
 
 # ─── Утилита: смещение → IANA timezone ────────────────────
 
-# Маппинг целочисленных UTC-смещений в нормальные IANA зоны.
-# Google Calendar API принимает эти зоны без проблем.
 _OFFSET_TO_IANA = {
     -12: "Etc/GMT+12",
     -11: "Pacific/Pago_Pago",
@@ -58,7 +63,7 @@ _OFFSET_TO_IANA = {
     -2: "Atlantic/South_Georgia",
     -1: "Atlantic/Azores",
     0: "Etc/GMT",
-    1: "Europe/London",      # CET в зимнее, но для offset +1 нормально
+    1: "Europe/London",
     2: "Europe/Berlin",
     3: "Europe/Moscow",
     4: "Asia/Dubai",
@@ -74,7 +79,6 @@ _OFFSET_TO_IANA = {
     14: "Pacific/Kiritimati",
 }
 
-# Дробные смещения
 _FRACTIONAL_TO_IANA = {
     "+3:30": "Asia/Tehran",
     "+4:30": "Asia/Kabul",
@@ -88,16 +92,11 @@ _FRACTIONAL_TO_IANA = {
 
 
 def offset_to_iana(offset_str: str) -> str | None:
-    """
-    Конвертирует "+3", "-5", "+5:30" в IANA timezone.
-    Использует реальные географические зоны, а не Etc/GMT.
-    """
     offset_str = offset_str.strip().replace("UTC", "").replace("utc", "")
 
     if offset_str in _FRACTIONAL_TO_IANA:
         return _FRACTIONAL_TO_IANA[offset_str]
 
-    # Парсим целое число
     match = re.match(r'^([+-]?)(\d{1,2})$', offset_str)
     if not match:
         return None
@@ -110,8 +109,6 @@ def offset_to_iana(offset_str: str) -> str | None:
 
 
 def iana_to_display(tz: str) -> str:
-    """Красивое отображение timezone для пользователя."""
-    # Ищем в маппинге обратно
     for offset, zone in _OFFSET_TO_IANA.items():
         if zone == tz:
             if offset == 0:
@@ -119,7 +116,6 @@ def iana_to_display(tz: str) -> str:
             sign = "+" if offset > 0 else ""
             return f"UTC{sign}{offset}"
 
-    # Для дробных
     for offset_str, zone in _FRACTIONAL_TO_IANA.items():
         if zone == tz:
             return f"UTC{offset_str}"
@@ -127,14 +123,28 @@ def iana_to_display(tz: str) -> str:
     return tz
 
 
+# ─── Хелпер: получить UUID из context или БД ─────────────
+
+async def _get_user_id(telegram_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Получает UUID user_id. Кэширует в context.user_data."""
+    cached = context.user_data.get("user_id")
+    if cached:
+        return cached
+
+    user_id = await get_user_id_by_telegram(telegram_id)
+    if user_id:
+        context.user_data["user_id"] = user_id
+    return user_id
+
+
 # ─── /start ───────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    await ensure_user(user.id, user.username)
+    user_id = await ensure_user(user.id, user.username, user.first_name)
+    context.user_data["user_id"] = user_id
 
-    # Проверяем, установлен ли timezone
-    tz = await load_timezone(user.id)
+    tz = await load_timezone(user_id)
     if tz:
         await _send_welcome(update)
     else:
@@ -150,7 +160,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _send_welcome(update_or_query):
-    """Отправляет приветственное сообщение."""
     text = (
         "🗓️ Я Revory — твой личный календарный ассистент!\n\n"
         "Могу:\n"
@@ -175,7 +184,11 @@ async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    user_id = query.from_user.id
+    telegram_id = query.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
+    if not user_id:
+        await query.edit_message_text("❌ Ошибка. Нажми /start")
+        return
 
     if data.startswith("tz_set:"):
         tz = data.split(":", 1)[1]
@@ -198,10 +211,6 @@ async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Обработка ввода timezone ─────────────────────────────
 
 async def handle_timezone_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Если пользователь в режиме ввода timezone — обрабатываем.
-    Возвращает True если обработано, False если нет.
-    """
     if not context.user_data.get("awaiting_timezone"):
         return False
 
@@ -214,7 +223,12 @@ async def handle_timezone_input(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return True
 
-    user_id = update.message.from_user.id
+    telegram_id = update.message.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
+    if not user_id:
+        await update.message.reply_text("❌ Ошибка. Нажми /start")
+        return True
+
     await save_timezone(user_id, tz)
     context.user_data["awaiting_timezone"] = False
 
@@ -229,13 +243,15 @@ async def handle_timezone_input(update: Update, context: ContextTypes.DEFAULT_TY
 # ─── /timezone (смена timezone) ───────────────────────────
 
 async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    current_tz = await load_timezone(user_id)
+    telegram_id = update.message.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
 
     msg = ""
-    if current_tz:
-        display = iana_to_display(current_tz)
-        msg = f"Текущий часовой пояс: {display}\n\n"
+    if user_id:
+        current_tz = await load_timezone(user_id)
+        if current_tz:
+            display = iana_to_display(current_tz)
+            msg = f"Текущий часовой пояс: {display}\n\n"
 
     keyboard = [
         [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
@@ -251,7 +267,9 @@ async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    await ensure_user(user.id, user.username)
+    user_id = await ensure_user(user.id, user.username, user.first_name)
+    context.user_data["user_id"] = user_id
+
     auth_url = start_auth(user.id)
 
     await update.message.reply_text(
@@ -266,7 +284,7 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── OAuth callback ───────────────────────────────────────
 
 async def auth_callback(request: Request):
-    """Google OAuth callback — GET /auth/callback?code=...&state=user_id"""
+    """Google OAuth callback — GET /auth/callback?code=...&state=telegram_id"""
     code = request.query_params.get("code")
     state = request.query_params.get("state")
 
@@ -274,21 +292,25 @@ async def auth_callback(request: Request):
         return HTMLResponse("<h2>Ошибка: отсутствует code или state.</h2>", status_code=400)
 
     try:
-        user_id = int(state)
+        telegram_id = int(state)
     except ValueError:
         return HTMLResponse("<h2>Ошибка: некорректный state.</h2>", status_code=400)
 
-    success = await finish_auth_callback(user_id, code)
+    user_id = await get_user_id_by_telegram(telegram_id)
+    if not user_id:
+        return HTMLResponse("<h2>Ошибка: пользователь не найден. Нажми /start в боте.</h2>", status_code=400)
+
+    success = await finish_auth_callback(user_id, telegram_id, code)
 
     if success:
         if _telegram_app:
             try:
                 await _telegram_app.bot.send_message(
-                    chat_id=user_id,
+                    chat_id=telegram_id,
                     text="✅ Google Calendar успешно подключён! Теперь просто пиши что нужно сделать.",
                 )
             except Exception as e:
-                logger.error(f"Failed to notify user {user_id}: {e}")
+                logger.error(f"Failed to notify user {telegram_id}: {e}")
 
         return HTMLResponse(
             "<h2>✅ Готово! Google Calendar подключён.</h2>"
@@ -309,13 +331,12 @@ async def health(request: Request):
 # ─── Обёртка для text handler с проверкой timezone ────────
 
 async def handle_text_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет timezone ввод, потом проверяет наличие timezone, потом передаёт в text handler."""
     handled = await handle_timezone_input(update, context)
     if handled:
         return
 
-    user_id = update.message.from_user.id
-    tz = await load_timezone(user_id)
+    telegram_id = update.message.from_user.id
+    tz = await load_timezone_by_telegram(telegram_id)
     if not tz:
         keyboard = [
             [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
@@ -353,17 +374,14 @@ def build_starlette_app(telegram_app: Application) -> Starlette:
 async def on_startup(telegram_app: Application):
     await telegram_app.initialize()
 
-    # Миграции БД
     await get_pool()
-    await run_migrations()
-    logger.info("DB pool initialized, migrations done")
+    logger.info("DB pool initialized")
 
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
         await telegram_app.bot.set_webhook(f"{webhook_url}/webhook")
         logger.info(f"Webhook set: {webhook_url}/webhook")
 
-    # Keep-alive
     if webhook_url:
         import asyncio
         import httpx
@@ -393,7 +411,6 @@ def main():
 
     _telegram_app = Application.builder().token(token).build()
 
-    # Команды
     _telegram_app.add_handler(CommandHandler("start", cmd_start))
     _telegram_app.add_handler(CommandHandler("auth", cmd_auth))
     _telegram_app.add_handler(CommandHandler("timezone", cmd_timezone))

@@ -1,6 +1,7 @@
 """
-Revory — Text Handler
+Revory — Text Handler (Schema v9)
 Роутер: принимает текст → AI парсит → вызывает calendar.
+Работает с UUID user_id через маппинг telegram_id → UUID.
 """
 
 import logging
@@ -17,14 +18,19 @@ from services.calendar import (
     get_events,
     delete_event,
 )
-from services.database import load_timezone
+from services.database import get_user_id_by_telegram, load_timezone
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TZ = "Europe/Moscow"
 
 
-async def _get_user_now(user_id: int) -> tuple[datetime, str]:
+async def _resolve_user(telegram_id: int):
+    """Получает UUID по telegram_id. Кэш можно добавить позже."""
+    return await get_user_id_by_telegram(telegram_id)
+
+
+async def _get_user_now(user_id) -> tuple[datetime, str]:
     """Возвращает (текущее время пользователя, IANA timezone)."""
     tz_name = await load_timezone(user_id) or DEFAULT_TZ
     tz = ZoneInfo(tz_name)
@@ -35,9 +41,15 @@ async def _get_user_now(user_id: int) -> tuple[datetime, str]:
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главный обработчик текстовых сообщений."""
     text = update.message.text.strip()
-    user_id = update.message.from_user.id
+    telegram_id = update.message.from_user.id
 
-    # --- Проверка: подключён ли Google Calendar ---
+    # --- Маппинг telegram_id → UUID ---
+    user_id = await _resolve_user(telegram_id)
+    if not user_id:
+        await update.message.reply_text("❌ Ошибка: пользователь не найден. Нажми /start")
+        return
+
+    # --- Проверка: подключён ли календарь ---
     creds = await get_credentials(user_id)
     if not creds:
         await update.message.reply_text(
@@ -77,7 +89,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Создание события ─────────────────────────────────────
 
-async def _handle_create(update: Update, user_id: int, parsed: dict):
+async def _handle_create(update: Update, user_id, parsed: dict):
     title = parsed.get("title")
     date_str = parsed.get("date")
     time_str = parsed.get("time")
@@ -121,7 +133,7 @@ async def _handle_create(update: Update, user_id: int, parsed: dict):
 
 # ─── Показ событий ────────────────────────────────────────
 
-async def _handle_show(update: Update, user_id: int, parsed: dict, user_now: datetime):
+async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime):
     period = parsed.get("period", "today")
 
     if period == "tomorrow":
@@ -176,8 +188,8 @@ async def _handle_show(update: Update, user_id: int, parsed: dict, user_now: dat
 
 # ─── Удаление события ─────────────────────────────────────
 
-async def _handle_delete(update: Update, user_id: int, parsed: dict, user_now: datetime):
-    title_query = parsed.get("title", "").lower()
+async def _handle_delete(update: Update, user_id, parsed: dict, user_now: datetime):
+    title_query = (parsed.get("title") or "").lower()
 
     if not title_query:
         await update.message.reply_text("🤔 Какое именно событие удалить?")
