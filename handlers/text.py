@@ -82,8 +82,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = parsed.get("reply", "Напоминания скоро будут!")
         await update.message.reply_text(f"⏰ {reply}")
 
+    elif intent == "change_timezone":
+        await update.message.reply_text(
+            "⏰ Чтобы сменить часовой пояс, используй команду /timezone"
+        )
+
+    elif intent == "connect_calendar":
+        await update.message.reply_text(
+            "🔑 Чтобы подключить календарь, используй команду /auth"
+        )
+
+    elif intent == "help":
+        await update.message.reply_text(
+            "🗓️ Вот что я умею:\n\n"
+            "• Создать событие — «встреча завтра в 15:00 с клиентом»\n"
+            "• Показать расписание — «что у меня сегодня?»\n"
+            "• Удалить событие — «удали встречу с клиентом»\n"
+            "• Напоминание — «напомни в 10 утра купить продукты»\n\n"
+            "📌 Команды:\n"
+            "/auth — подключить календарь\n"
+            "/timezone — сменить часовой пояс\n\n"
+            "Просто пиши как думаешь!"
+        )
+
+    elif intent == "chitchat":
+        reply = parsed.get("reply", "Привет! Чем могу помочь?")
+        await update.message.reply_text(reply)
+
     else:
-        reply = parsed.get("reply", "Не совсем понял. Попробуй по-другому?")
+        reply = parsed.get("reply", "Не совсем поняла. Попробуй написать что-нибудь вроде «встреча завтра в 15:00» или «что у меня сегодня?»")
         await update.message.reply_text(reply)
 
 

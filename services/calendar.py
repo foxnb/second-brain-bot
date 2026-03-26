@@ -27,7 +27,11 @@ from services.database import (
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
 DEFAULT_TZ = "Europe/Moscow"
 
 # telegram_id -> Flow (живёт в памяти пока идёт OAuth)
@@ -127,15 +131,20 @@ async def finish_auth_callback(
         creds = flow.credentials
         token_data = json.loads(creds.to_json())
 
-        # Пытаемся получить email из Google
+        # Получаем email из id_token (приходит благодаря scope openid + email)
         provider_email = None
-        try:
-            from googleapiclient.discovery import build as build_svc
-            svc = build_svc("oauth2", "v2", credentials=creds)
-            user_info = svc.userinfo().get().execute()
-            provider_email = user_info.get("email")
-        except Exception as e:
-            logger.warning(f"Could not fetch Google email: {e}")
+        if hasattr(creds, "id_token") and creds.id_token:
+            try:
+                # id_token — это JWT, парсим payload без верификации (мы доверяем Google)
+                import base64
+                payload = creds.id_token.split(".")[1]
+                # Добавляем padding
+                payload += "=" * (4 - len(payload) % 4)
+                id_info = json.loads(base64.urlsafe_b64decode(payload))
+                provider_email = id_info.get("email")
+                logger.info(f"Got Google email from id_token: {provider_email}")
+            except Exception as e:
+                logger.warning(f"Could not parse id_token: {e}")
 
         await save_calendar_connection(
             user_id=user_id,
