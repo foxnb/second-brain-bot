@@ -154,35 +154,51 @@ async def save_calendar_connection(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Проверяем, есть ли уже подключения
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1",
-                user_id,
-            )
-            is_primary = count == 0  # Первое подключение = primary
-
-            # Upsert: если уже есть такой провайдер+email — обновляем токены
-            row = await conn.fetchrow(
+            # Ищем существующее подключение для этого провайдера
+            # (NULL-safe: COALESCE обрабатывает NULL email)
+            existing = await conn.fetchrow(
                 """
-                INSERT INTO calendar_connections
-                    (user_id, provider, provider_email, access_token_encrypted,
-                     refresh_token_encrypted, is_primary, status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'active')
-                ON CONFLICT (user_id, provider, provider_email)
-                DO UPDATE SET
-                    access_token_encrypted = EXCLUDED.access_token_encrypted,
-                    refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-                    status = 'active',
-                    updated_at = now()
-                RETURNING id
+                SELECT id FROM calendar_connections
+                WHERE user_id = $1 AND provider = $2
+                  AND COALESCE(provider_email, '') = COALESCE($3, '')
                 """,
-                user_id,
-                provider,
-                provider_email,
-                token_json,
-                refresh_token,
-                is_primary,
+                user_id, provider, provider_email,
             )
+
+            if existing:
+                # Обновляем токены существующего подключения
+                row = await conn.fetchrow(
+                    """
+                    UPDATE calendar_connections
+                    SET access_token_encrypted = $1,
+                        refresh_token_encrypted = $2,
+                        provider_email = COALESCE($3, provider_email),
+                        status = 'active',
+                        updated_at = now()
+                    WHERE id = $4
+                    RETURNING id
+                    """,
+                    token_json, refresh_token, provider_email, existing["id"],
+                )
+            else:
+                # Новое подключение — проверяем нужен ли primary
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1",
+                    user_id,
+                )
+                is_primary = count == 0
+
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO calendar_connections
+                        (user_id, provider, provider_email, access_token_encrypted,
+                         refresh_token_encrypted, is_primary, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                    RETURNING id
+                    """,
+                    user_id, provider, provider_email,
+                    token_json, refresh_token, is_primary,
+                )
 
     connection_id = row["id"]
     logger.info(f"Saved {provider} calendar for user {user_id} (conn={connection_id}, primary={is_primary})")
