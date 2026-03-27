@@ -18,7 +18,7 @@ from services.calendar import (
     get_events,
     delete_event,
 )
-from services.database import get_user_id_by_telegram, load_timezone
+from services.database import get_internal_user_id, load_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ DEFAULT_TZ = "Europe/Moscow"
 
 async def _resolve_user(telegram_id: int):
     """Получает UUID по telegram_id. Кэш можно добавить позже."""
-    return await get_user_id_by_telegram(telegram_id)
+    return await get_internal_user_id(telegram_id)
 
 
 async def _get_user_now(user_id) -> tuple[datetime, str]:

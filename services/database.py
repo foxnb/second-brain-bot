@@ -82,7 +82,7 @@ async def ensure_user(
     return user_id
 
 
-async def get_user_id_by_telegram(telegram_id: int) -> Optional[UUID]:
+async def get_internal_user_id(telegram_id: int) -> Optional[UUID]:
     """Получает UUID пользователя по Telegram ID. None если не найден."""
     pool = await get_pool()
     row = await pool.fetchrow(
