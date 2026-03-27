@@ -28,10 +28,10 @@ from handlers.text import handle_text
 from services.calendar import start_auth, finish_auth_callback
 from services.database import (
     ensure_user,
-    get_user_id_by_telegram,
+    get_internal_user_id,
     save_timezone,
     load_timezone,
-    load_timezone_by_telegram,
+    load_calendar_connection,
     get_pool,
 )
 
@@ -131,7 +131,7 @@ async def _get_user_id(telegram_id: int, context: ContextTypes.DEFAULT_TYPE):
     if cached:
         return cached
 
-    user_id = await get_user_id_by_telegram(telegram_id)
+    user_id = await get_internal_user_id(telegram_id)
     if user_id:
         context.user_data["user_id"] = user_id
     return user_id
@@ -194,10 +194,19 @@ async def tz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tz = data.split(":", 1)[1]
         await save_timezone(user_id, tz)
         display = iana_to_display(tz)
-        await query.edit_message_text(
-            f"✅ Часовой пояс установлен: {display}\n\n"
-            "Теперь подключи календарь: /auth"
-        )
+
+        # Проверяем, подключён ли уже календарь
+        conn = await load_calendar_connection(user_id)
+        if conn:
+            await query.edit_message_text(
+                f"✅ Часовой пояс изменён: {display}\n\n"
+                "Готово! Просто пиши что нужно сделать."
+            )
+        else:
+            await query.edit_message_text(
+                f"✅ Часовой пояс установлен: {display}\n\n"
+                "Теперь подключи календарь: /auth"
+            )
 
     elif data == "tz_ask_custom":
         context.user_data["awaiting_timezone"] = True
@@ -233,10 +242,18 @@ async def handle_timezone_input(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["awaiting_timezone"] = False
 
     display = iana_to_display(tz)
-    await update.message.reply_text(
-        f"✅ Часовой пояс установлен: {display}\n\n"
-        "Теперь подключи календарь: /auth"
-    )
+
+    conn = await load_calendar_connection(user_id)
+    if conn:
+        await update.message.reply_text(
+            f"✅ Часовой пояс изменён: {display}\n\n"
+            "Готово! Просто пиши что нужно сделать."
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Часовой пояс установлен: {display}\n\n"
+            "Теперь подключи календарь: /auth"
+        )
     return True
 
 
@@ -296,7 +313,7 @@ async def auth_callback(request: Request):
     except ValueError:
         return HTMLResponse("<h2>Ошибка: некорректный state.</h2>", status_code=400)
 
-    user_id = await get_user_id_by_telegram(telegram_id)
+    user_id = await get_internal_user_id(telegram_id)
     if not user_id:
         return HTMLResponse("<h2>Ошибка: пользователь не найден. Нажми /start в боте.</h2>", status_code=400)
 
@@ -336,7 +353,12 @@ async def handle_text_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     telegram_id = update.message.from_user.id
-    tz = await load_timezone_by_telegram(telegram_id)
+    user_id = await get_internal_user_id(telegram_id)
+
+    tz = None
+    if user_id:
+        tz = await load_timezone(user_id)
+
     if not tz:
         keyboard = [
             [InlineKeyboardButton("🇷🇺 Москва (UTC+3)", callback_data="tz_set:Europe/Moscow")],
