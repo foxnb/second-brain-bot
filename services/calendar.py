@@ -22,6 +22,7 @@ from services.database import (
     load_calendar_connection,
     save_calendar_connection,
     update_calendar_tokens,
+    update_user_email,
     load_timezone,
 )
 
@@ -75,10 +76,16 @@ async def get_credentials(user_id: UUID) -> Optional[Credentials]:
     """Загружает Google credentials из calendar_connections."""
     conn_data = await load_calendar_connection(user_id, provider="google")
     if not conn_data:
+        logger.warning(f"No calendar_connection found for user {user_id}, provider=google")
         return None
 
-    token_data = conn_data["token_data"]
+    token_data = conn_data.get("token_data")
+    if not token_data:
+        logger.warning(f"Calendar connection {conn_data['id']} has no token_data")
+        return None
+
     connection_id = conn_data["id"]
+    logger.info(f"Found calendar connection {connection_id} for user {user_id}")
 
     creds = Credentials.from_authorized_user_info(token_data, SCOPES)
 
@@ -152,6 +159,10 @@ async def finish_auth_callback(
             token_data=token_data,
             provider_email=provider_email,
         )
+
+        # Заполняем email в users если ещё не установлен
+        if provider_email:
+            await update_user_email(user_id, provider_email)
 
         del _pending_flows[telegram_id]
         logger.info(f"Google auth done for user {user_id} (tg={telegram_id})")

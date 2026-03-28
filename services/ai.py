@@ -91,6 +91,7 @@ async def parse_message(
     text: str,
     user_now: datetime | None = None,
     tz_name: str = "Europe/Moscow",
+    history: list[dict] | None = None,
 ) -> dict:
     if user_now is None:
         user_now = datetime.now()
@@ -103,14 +104,18 @@ async def parse_message(
         timezone=tz_name,
     )
 
+    # Собираем сообщения: system + история + текущее
+    messages = [{"role": "system", "content": system}]
+    if history:
+        for msg in history[-8:]:  # Последние 8 сообщений из истории
+            messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": text})
+
     try:
         client = _get_client()
         response = client.chat.completions.create(
             model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": text},
-            ],
+            messages=messages,
             temperature=0.1,
             max_tokens=300,
         )

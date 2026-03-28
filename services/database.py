@@ -96,6 +96,16 @@ async def get_internal_user_id(telegram_id: int) -> Optional[UUID]:
     return row["user_id"] if row else None
 
 
+async def update_user_email(user_id: UUID, email: str):
+    """Заполняет email в users если ещё не установлен."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET email = $1 WHERE id = $2 AND email IS NULL",
+        email, user_id,
+    )
+    logger.info(f"Set user email {email} for {user_id}")
+
+
 # ─── Timezone ─────────────────────────────────────────────
 
 async def save_timezone(user_id: UUID, timezone: str):
@@ -131,6 +141,37 @@ async def load_timezone_by_telegram(telegram_id: int) -> Optional[str]:
         str(telegram_id),
     )
     return row["timezone"] if row and row["timezone"] else None
+
+
+# ─── Messages (контекст диалога) ──────────────────────────
+
+async def save_message(user_id: UUID, role: str, content: str, parsed: dict = None):
+    """Сохраняет сообщение в историю."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO messages (user_id, role, content, parsed)
+        VALUES ($1, $2, $3, $4)
+        """,
+        user_id, role, content,
+        json.dumps(parsed) if parsed else None,
+    )
+
+
+async def get_recent_messages(user_id: UUID, limit: int = 10) -> list[dict]:
+    """Возвращает последние N сообщений для контекста AI."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT role, content FROM messages
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        """,
+        user_id, limit,
+    )
+    # Возвращаем в хронологическом порядке (от старых к новым)
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
 # ─── Calendar Connections ─────────────────────────────────

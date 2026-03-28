@@ -18,7 +18,7 @@ from services.calendar import (
     get_events,
     delete_event,
 )
-from services.database import get_internal_user_id, load_timezone, save_reminder
+from services.database import get_internal_user_id, load_timezone, save_reminder, save_message, get_recent_messages
 
 logger = logging.getLogger(__name__)
 
@@ -63,45 +63,48 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Получаем timezone пользователя ---
     user_now, tz_name = await _get_user_now(user_id)
 
-    # --- Отправляем текст в AI (с timezone) ---
+    # --- Загружаем историю диалога ---
+    history = await get_recent_messages(user_id, limit=10)
+
+    # --- Отправляем текст в AI (с timezone + историей) ---
     await update.message.chat.send_action("typing")
-    parsed = await parse_message(text, user_now=user_now, tz_name=tz_name)
+    parsed = await parse_message(text, user_now=user_now, tz_name=tz_name, history=history)
     intent = parsed.get("intent", "unknown")
 
     logger.info(f"User {user_id} | Intent: {intent} | Parsed: {parsed}")
 
+    # --- Сохраняем сообщение пользователя ---
+    await save_message(user_id, "user", text)
+
     # --- Роутинг по intent ---
+    reply_text = None
+
     if intent == "create_event":
-        await _handle_create(update, user_id, parsed)
+        reply_text = await _handle_create(update, user_id, parsed)
 
     elif intent == "show_events":
-        await _handle_show(update, user_id, parsed, user_now)
+        reply_text = await _handle_show(update, user_id, parsed, user_now)
 
     elif intent == "delete_event":
-        await _handle_delete(update, user_id, parsed, user_now)
+        reply_text = await _handle_delete(update, user_id, parsed, user_now)
 
     elif intent == "remind":
-        await _handle_remind(update, user_id, parsed, user_now, tz_name)
+        reply_text = await _handle_remind(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "change_timezone":
-        tz_name = await load_timezone(user_id)
-        if tz_name:
-            await update.message.reply_text(
-                f"⏰ Текущий часовой пояс: {tz_name}\n\n"
-                "Хочешь сменить? Нажми /timezone"
-            )
+        tz_name_current = await load_timezone(user_id)
+        if tz_name_current:
+            reply_text = f"⏰ Текущий часовой пояс: {tz_name_current}\n\nХочешь сменить? Нажми /timezone"
         else:
-            await update.message.reply_text(
-                "⏰ Часовой пояс не установлен. Нажми /timezone"
-            )
+            reply_text = "⏰ Часовой пояс не установлен. Нажми /timezone"
+        await update.message.reply_text(reply_text)
 
     elif intent == "connect_calendar":
-        await update.message.reply_text(
-            "🔑 Чтобы подключить календарь, используй команду /auth"
-        )
+        reply_text = "🔑 Чтобы подключить календарь, используй команду /auth"
+        await update.message.reply_text(reply_text)
 
     elif intent == "help":
-        await update.message.reply_text(
+        reply_text = (
             "🗓️ Вот что я умею:\n\n"
             "• Создать событие — «встреча завтра в 15:00 с клиентом»\n"
             "• Показать расписание — «что у меня сегодня?»\n"
@@ -112,14 +115,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/timezone — сменить часовой пояс\n\n"
             "Просто пиши как думаешь!"
         )
+        await update.message.reply_text(reply_text)
 
     elif intent == "chitchat":
-        reply = parsed.get("reply", "Привет! Чем могу помочь?")
-        await update.message.reply_text(reply)
+        reply_text = parsed.get("reply", "Привет! Чем могу помочь?")
+        await update.message.reply_text(reply_text)
 
     else:
-        reply = parsed.get("reply", "Не совсем поняла. Попробуй написать что-нибудь вроде «встреча завтра в 15:00» или «что у меня сегодня?»")
-        await update.message.reply_text(reply)
+        reply_text = parsed.get("reply", "Не совсем поняла. Попробуй написать что-нибудь вроде «встреча завтра в 15:00» или «что у меня сегодня?»")
+        await update.message.reply_text(reply_text)
+
+    # --- Сохраняем ответ ассистента ---
+    if reply_text:
+        await save_message(user_id, "assistant", reply_text)
 
 
 # ─── Создание события ─────────────────────────────────────
@@ -130,19 +138,21 @@ async def _handle_create(update: Update, user_id, parsed: dict):
     time_str = parsed.get("time")
 
     if not title:
-        await update.message.reply_text("🤔 Не понял название события. Попробуй ещё раз.")
-        return
+        r = "🤔 Не понял название события. Попробуй ещё раз."
+        await update.message.reply_text(r)
+        return r
 
     if not date_str or not time_str:
-        reply = parsed.get("reply", "Укажи дату и время для события.")
-        await update.message.reply_text(f"📅 {reply}")
-        return
+        r = f"📅 {parsed.get('reply', 'Укажи дату и время для события.')}"
+        await update.message.reply_text(r)
+        return r
 
     try:
         start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:
-        await update.message.reply_text("❌ Не смог разобрать дату/время. Попробуй: завтра в 15:00")
-        return
+        r = "❌ Не смог разобрать дату/время. Попробуй: завтра в 15:00"
+        await update.message.reply_text(r)
+        return r
 
     end_time_str = parsed.get("end_time")
     end_time = None
@@ -156,14 +166,13 @@ async def _handle_create(update: Update, user_id, parsed: dict):
 
     if result:
         start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
-        await update.message.reply_text(
-            f"✅ Создано: **{result['title']}**\n"
-            f"📅 {start_fmt}\n"
-            f"🔗 {result['link']}",
-            parse_mode="Markdown"
-        )
+        r = f"✅ Создано: **{result['title']}**\n📅 {start_fmt}\n🔗 {result['link']}"
+        await update.message.reply_text(r, parse_mode="Markdown")
+        return r
     else:
-        await update.message.reply_text("❌ Не удалось создать событие. Попробуй позже.")
+        r = "❌ Не удалось создать событие. Попробуй позже."
+        await update.message.reply_text(r)
+        return r
 
 
 # ─── Показ событий ────────────────────────────────────────
@@ -201,12 +210,14 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
     events = await get_events(user_id, time_min_naive, time_max_naive)
 
     if events is None:
-        await update.message.reply_text("❌ Ошибка при загрузке событий.")
-        return
+        r = "❌ Ошибка при загрузке событий."
+        await update.message.reply_text(r)
+        return r
 
     if not events:
-        await update.message.reply_text(f"📭 На {label} событий нет. Свободна как ветер!")
-        return
+        r = f"📭 На {label} событий нет. Свободна как ветер!"
+        await update.message.reply_text(r)
+        return r
 
     lines = [f"📅 **Расписание {label}:**\n"]
     for e in events:
@@ -218,7 +229,9 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
             time_fmt = start
         lines.append(f"• {time_fmt} — {e['title']}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    r = "\n".join(lines)
+    await update.message.reply_text(r, parse_mode="Markdown")
+    return r
 
 
 # ─── Удаление события ─────────────────────────────────────
@@ -227,8 +240,9 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
     title_query = (parsed.get("title") or "").lower()
 
     if not title_query:
-        await update.message.reply_text("🤔 Какое именно событие удалить?")
-        return
+        r = "🤔 Какое именно событие удалить?"
+        await update.message.reply_text(r)
+        return r
 
     time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
     time_max = time_min + timedelta(days=7)
@@ -239,29 +253,33 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
     events = await get_events(user_id, time_min_naive, time_max_naive, max_results=20)
 
     if not events:
-        await update.message.reply_text("📭 Не нашёл событий для удаления.")
-        return
+        r = "📭 Не нашёл событий для удаления."
+        await update.message.reply_text(r)
+        return r
 
     matches = [e for e in events if title_query in e["title"].lower()]
 
     if not matches:
-        await update.message.reply_text(
-            f"🔍 Не нашёл событие \"{parsed.get('title')}\" на ближайшую неделю."
-        )
-        return
+        r = f"🔍 Не нашёл событие \"{parsed.get('title')}\" на ближайшую неделю."
+        await update.message.reply_text(r)
+        return r
 
     if len(matches) == 1:
         event = matches[0]
         success = await delete_event(user_id, event["id"])
         if success:
-            await update.message.reply_text(f"🗑️ Удалено: {event['title']}")
+            r = f"🗑️ Удалено: {event['title']}"
         else:
-            await update.message.reply_text("❌ Не удалось удалить. Попробуй позже.")
+            r = "❌ Не удалось удалить. Попробуй позже."
+        await update.message.reply_text(r)
+        return r
     else:
         lines = ["Нашёл несколько совпадений. Какое удалить?\n"]
         for i, e in enumerate(matches, 1):
             lines.append(f"{i}. {e['title']} — {e['start']}")
-        await update.message.reply_text("\n".join(lines))
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
 
 
 # ─── Напоминание ──────────────────────────────────────────
@@ -272,12 +290,14 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
     time_str = parsed.get("time")
 
     if not title:
-        await update.message.reply_text("🤔 О чём напомнить? Попробуй: «напомни позвонить маме в 18:00»")
-        return
+        r = "🤔 О чём напомнить? Попробуй: «напомни позвонить маме в 18:00»"
+        await update.message.reply_text(r)
+        return r
 
     if not time_str:
-        await update.message.reply_text("⏰ Укажи время. Например: «напомни купить молоко завтра в 10:00»")
-        return
+        r = "⏰ Укажи время. Например: «напомни купить молоко завтра в 10:00»"
+        await update.message.reply_text(r)
+        return r
 
     # Собираем дату+время
     if not date_str:
@@ -286,8 +306,9 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
     try:
         remind_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:
-        await update.message.reply_text("❌ Не смогла разобрать дату/время.")
-        return
+        r = "❌ Не смогла разобрать дату/время."
+        await update.message.reply_text(r)
+        return r
 
     # Делаем aware в timezone пользователя
     tz = ZoneInfo(tz_name)
@@ -295,16 +316,15 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
 
     # Проверяем что не в прошлом
     if remind_at <= user_now:
-        await update.message.reply_text("⏰ Это время уже прошло. Укажи будущее время.")
-        return
+        r = "⏰ Это время уже прошло. Укажи будущее время."
+        await update.message.reply_text(r)
+        return r
 
     # Сохраняем в БД
     reminder_id = await save_reminder(user_id, title, remind_at)
 
     # Форматируем подтверждение
     remind_fmt = remind_naive.strftime("%d.%m.%Y в %H:%M")
-    await update.message.reply_text(
-        f"✅ Напоминание установлено!\n"
-        f"📌 {title}\n"
-        f"⏰ {remind_fmt}"
-    )
+    r = f"✅ Напоминание установлено!\n📌 {title}\n⏰ {remind_fmt}"
+    await update.message.reply_text(r)
+    return r
