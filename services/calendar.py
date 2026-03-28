@@ -280,3 +280,24 @@ async def delete_event(user_id: UUID, event_id: str) -> bool:
     except Exception as e:
         logger.error(f"Delete event error: {e}")
         return False
+
+
+async def revoke_google_token(access_token: str) -> bool:
+    """Отзывает Google OAuth токен (GDPR compliance)."""
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://oauth2.googleapis.com/revoke",
+                params={"token": access_token},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if resp.status_code == 200:
+                logger.info("Google token revoked successfully")
+                return True
+            else:
+                logger.warning(f"Google token revoke failed: {resp.status_code} {resp.text}")
+                return False
+    except Exception as e:
+        logger.error(f"Google token revoke error: {e}")
+        return False

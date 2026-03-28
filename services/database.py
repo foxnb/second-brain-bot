@@ -405,3 +405,59 @@ async def cancel_reminder(reminder_id: int, user_id: UUID) -> bool:
         reminder_id, user_id,
     )
     return "UPDATE 1" in result
+
+
+# ─── Disconnect / Logout / Delete ──────────────────────────
+
+async def disconnect_calendar(user_id: UUID, provider: str = "google") -> bool:
+    """Отключает календарь (удаляет токены, аккаунт остаётся)."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM calendar_connections WHERE user_id = $1 AND provider = $2",
+        user_id, provider,
+    )
+    logger.info(f"Disconnected {provider} calendar for user {user_id}")
+    return "DELETE" in result
+
+
+async def logout_user(user_id: UUID) -> dict:
+    """
+    Полный выход: удаляет пользователя и все данные.
+    CASCADE в FK удалит auth_methods, calendar_connections,
+    messages, reminders, events, attachments.
+    """
+    pool = await get_pool()
+    stats = {}
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            stats["reminders"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM reminders WHERE user_id = $1", user_id
+            )
+            stats["messages"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages WHERE user_id = $1", user_id
+            )
+            stats["calendars"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1", user_id
+            )
+            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+
+    logger.info(f"Deleted user {user_id}: {stats}")
+    return stats
+
+
+async def get_calendar_tokens_for_revoke(user_id: UUID) -> list[dict]:
+    """Получает токены для отзыва у провайдеров перед удалением."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT provider, access_token_encrypted FROM calendar_connections WHERE user_id = $1",
+        user_id,
+    )
+    result = []
+    for r in rows:
+        try:
+            token_data = json.loads(r["access_token_encrypted"])
+            result.append({"provider": r["provider"], "access_token": token_data.get("token")})
+        except Exception:
+            pass
+    return result

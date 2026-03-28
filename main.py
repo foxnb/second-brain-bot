@@ -25,7 +25,7 @@ from starlette.routing import Route
 import uvicorn
 
 from handlers.text import handle_text
-from services.calendar import start_auth, finish_auth_callback
+from services.calendar import start_auth, finish_auth_callback, revoke_google_token
 from services.database import (
     ensure_user,
     get_internal_user_id,
@@ -35,6 +35,9 @@ from services.database import (
     get_pool,
     get_pending_reminders,
     mark_reminder_sent,
+    disconnect_calendar,
+    logout_user,
+    get_calendar_tokens_for_revoke,
 )
 
 load_dotenv()
@@ -300,6 +303,72 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── /disconnect — отключить календарь ────────────────────
+
+async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = await _get_uid(update)
+    if not user_id:
+        await update.message.reply_text("❌ Ты ещё не зарегистрирован. Нажми /start")
+        return
+
+    success = await disconnect_calendar(user_id, "google")
+    if success:
+        await update.message.reply_text(
+            "✅ Google Calendar отключён.\n\n"
+            "Аккаунт и история сохранены. Подключить снова: /auth"
+        )
+    else:
+        await update.message.reply_text("Календарь и так не подключён.")
+
+
+# ─── /logout — полный выход ───────────────────────────────
+
+async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = await _get_uid(update)
+    if not user_id:
+        await update.message.reply_text("❌ Ты ещё не зарегистрирован.")
+        return
+
+    # Подтверждение
+    if not context.user_data.get("confirm_logout"):
+        context.user_data["confirm_logout"] = True
+        await update.message.reply_text(
+            "⚠️ Это удалит ВСЕ твои данные:\n"
+            "• Аккаунт\n"
+            "• Подключённые календари\n"
+            "• Историю сообщений\n"
+            "• Напоминания\n\n"
+            "Отправь /logout ещё раз для подтверждения."
+        )
+        return
+
+    context.user_data["confirm_logout"] = False
+
+    # Отзываем токены у провайдеров
+    tokens = await get_calendar_tokens_for_revoke(user_id)
+    for t in tokens:
+        if t["provider"] == "google" and t["access_token"]:
+            await revoke_google_token(t["access_token"])
+
+    # Удаляем всё
+    stats = await logout_user(user_id)
+
+    # Очищаем context
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "✅ Все данные удалены.\n\n"
+        "Чтобы начать заново — нажми /start"
+    )
+
+
+# ─── /deletedata — GDPR удаление (алиас logout) ──────────
+
+async def cmd_deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """GDPR-совместимое удаление — то же что /logout."""
+    await cmd_logout(update, context)
+
+
 # ─── OAuth callback ───────────────────────────────────────
 
 async def auth_callback(request: Request):
@@ -461,6 +530,9 @@ def main():
     _telegram_app.add_handler(CommandHandler("start", cmd_start))
     _telegram_app.add_handler(CommandHandler("auth", cmd_auth))
     _telegram_app.add_handler(CommandHandler("timezone", cmd_timezone))
+    _telegram_app.add_handler(CommandHandler("disconnect", cmd_disconnect))
+    _telegram_app.add_handler(CommandHandler("logout", cmd_logout))
+    _telegram_app.add_handler(CommandHandler("deletedata", cmd_deletedata))
     _telegram_app.add_handler(CallbackQueryHandler(tz_callback, pattern=r"^tz_"))
     _telegram_app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper)
