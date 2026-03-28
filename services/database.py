@@ -7,6 +7,7 @@ Supabase (PostgreSQL) через asyncpg
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
@@ -304,4 +305,62 @@ async def switch_primary_calendar(user_id: UUID, connection_id: int) -> bool:
                 connection_id,
                 user_id,
             )
+    return "UPDATE 1" in result
+
+
+# ─── Reminders ─────────────────────────────────────────────
+
+async def save_reminder(
+    user_id: UUID,
+    title: str,
+    remind_at: "datetime",
+    event_id: Optional[int] = None,
+) -> int:
+    """Сохраняет напоминание в БД. Возвращает ID."""
+    pool = await get_pool()
+    reminder_id = await pool.fetchval(
+        """
+        INSERT INTO reminders (user_id, assigned_to, title, remind_at, event_id, status)
+        VALUES ($1, $1, $2, $3, $4, 'pending')
+        RETURNING id
+        """,
+        user_id, title, remind_at, event_id,
+    )
+    logger.info(f"Saved reminder {reminder_id} for user {user_id}: '{title}' at {remind_at}")
+    return reminder_id
+
+
+async def get_pending_reminders() -> list[dict]:
+    """Возвращает все просроченные напоминания со статусом pending."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT r.id, r.user_id, r.title, r.remind_at,
+               am.provider_user_id AS telegram_id
+        FROM reminders r
+        JOIN auth_methods am ON am.user_id = r.user_id AND am.provider = 'telegram'
+        WHERE r.status = 'pending' AND r.remind_at <= now()
+        ORDER BY r.remind_at
+        LIMIT 50
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def mark_reminder_sent(reminder_id: int):
+    """Помечает напоминание как отправленное."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE reminders SET status = 'sent' WHERE id = $1",
+        reminder_id,
+    )
+
+
+async def cancel_reminder(reminder_id: int, user_id: UUID) -> bool:
+    """Отменяет напоминание (только своё)."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE reminders SET status = 'cancelled' WHERE id = $1 AND user_id = $2 AND status = 'pending'",
+        reminder_id, user_id,
+    )
     return "UPDATE 1" in result

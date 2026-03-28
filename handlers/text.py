@@ -18,7 +18,7 @@ from services.calendar import (
     get_events,
     delete_event,
 )
-from services.database import get_internal_user_id, load_timezone
+from services.database import get_internal_user_id, load_timezone, save_reminder
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- Проверка: подключён ли календарь ---
+    logger.info(f"Checking credentials for user_id={user_id} (telegram={telegram_id})")
     creds = await get_credentials(user_id)
     if not creds:
+        logger.warning(f"No credentials found for user_id={user_id}")
         await update.message.reply_text(
             "🔑 Сначала подключи Google Calendar.\n"
             "Нажми /auth чтобы начать."
@@ -79,13 +81,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_delete(update, user_id, parsed, user_now)
 
     elif intent == "remind":
-        reply = parsed.get("reply", "Напоминания скоро будут!")
-        await update.message.reply_text(f"⏰ {reply}")
+        await _handle_remind(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "change_timezone":
-        await update.message.reply_text(
-            "⏰ Чтобы сменить часовой пояс, используй команду /timezone"
-        )
+        tz_name = await load_timezone(user_id)
+        if tz_name:
+            await update.message.reply_text(
+                f"⏰ Текущий часовой пояс: {tz_name}\n\n"
+                "Хочешь сменить? Нажми /timezone"
+            )
+        else:
+            await update.message.reply_text(
+                "⏰ Часовой пояс не установлен. Нажми /timezone"
+            )
 
     elif intent == "connect_calendar":
         await update.message.reply_text(
@@ -254,3 +262,49 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         for i, e in enumerate(matches, 1):
             lines.append(f"{i}. {e['title']} — {e['start']}")
         await update.message.reply_text("\n".join(lines))
+
+
+# ─── Напоминание ──────────────────────────────────────────
+
+async def _handle_remind(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    title = parsed.get("title")
+    date_str = parsed.get("date")
+    time_str = parsed.get("time")
+
+    if not title:
+        await update.message.reply_text("🤔 О чём напомнить? Попробуй: «напомни позвонить маме в 18:00»")
+        return
+
+    if not time_str:
+        await update.message.reply_text("⏰ Укажи время. Например: «напомни купить молоко завтра в 10:00»")
+        return
+
+    # Собираем дату+время
+    if not date_str:
+        date_str = user_now.strftime("%Y-%m-%d")
+
+    try:
+        remind_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        await update.message.reply_text("❌ Не смогла разобрать дату/время.")
+        return
+
+    # Делаем aware в timezone пользователя
+    tz = ZoneInfo(tz_name)
+    remind_at = remind_naive.replace(tzinfo=tz)
+
+    # Проверяем что не в прошлом
+    if remind_at <= user_now:
+        await update.message.reply_text("⏰ Это время уже прошло. Укажи будущее время.")
+        return
+
+    # Сохраняем в БД
+    reminder_id = await save_reminder(user_id, title, remind_at)
+
+    # Форматируем подтверждение
+    remind_fmt = remind_naive.strftime("%d.%m.%Y в %H:%M")
+    await update.message.reply_text(
+        f"✅ Напоминание установлено!\n"
+        f"📌 {title}\n"
+        f"⏰ {remind_fmt}"
+    )

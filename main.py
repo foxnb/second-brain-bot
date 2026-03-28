@@ -33,6 +33,8 @@ from services.database import (
     load_timezone,
     load_calendar_connection,
     get_pool,
+    get_pending_reminders,
+    mark_reminder_sent,
 )
 
 load_dotenv()
@@ -407,6 +409,7 @@ async def on_startup(telegram_app: Application):
     if webhook_url:
         import asyncio
         import httpx
+
         async def keep_alive():
             while True:
                 await asyncio.sleep(5 * 60)
@@ -416,8 +419,30 @@ async def on_startup(telegram_app: Application):
                     logger.info("Keep-alive ping sent")
                 except Exception as e:
                     logger.warning(f"Keep-alive failed: {e}")
+
+        async def reminder_worker():
+            """Каждые 30 секунд проверяет просроченные напоминания и отправляет."""
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    reminders = await get_pending_reminders()
+                    for r in reminders:
+                        try:
+                            telegram_id = int(r["telegram_id"])
+                            await telegram_app.bot.send_message(
+                                chat_id=telegram_id,
+                                text=f"🔔 Напоминание: {r['title']}",
+                            )
+                            await mark_reminder_sent(r["id"])
+                            logger.info(f"Sent reminder {r['id']} to {telegram_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to send reminder {r['id']}: {e}")
+                except Exception as e:
+                    logger.error(f"Reminder worker error: {e}")
+
         asyncio.create_task(keep_alive())
-        logger.info("Keep-alive started")
+        asyncio.create_task(reminder_worker())
+        logger.info("Keep-alive and reminder worker started")
 
 
 async def on_shutdown(telegram_app: Application):
