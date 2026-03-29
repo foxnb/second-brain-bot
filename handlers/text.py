@@ -1,7 +1,7 @@
 """
 Revory — Text Handler (Schema v9)
 Роутер: принимает текст → AI парсит → вызывает calendar.
-Работает с UUID user_id через маппинг telegram_id → UUID.
+show_events читает из БД (после ленивой sync).
 """
 
 import logging
@@ -15,10 +15,18 @@ from services.ai import parse_message
 from services.calendar import (
     get_credentials,
     create_event,
-    get_events,
     delete_event,
 )
-from services.database import get_internal_user_id, load_timezone, save_reminder, save_message, get_recent_messages
+from services.sync import sync_calendar
+from services.database import (
+    get_internal_user_id,
+    load_timezone,
+    save_reminder,
+    save_message,
+    get_recent_messages,
+    get_events_from_db,
+    find_event_by_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +34,7 @@ DEFAULT_TZ = "Europe/Moscow"
 
 
 async def _resolve_user(telegram_id: int):
-    """Получает UUID по telegram_id. Кэш можно добавить позже."""
+    """Получает UUID по telegram_id."""
     return await get_internal_user_id(telegram_id)
 
 
@@ -83,10 +91,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = await _handle_create(update, user_id, parsed)
 
     elif intent == "show_events":
-        reply_text = await _handle_show(update, user_id, parsed, user_now)
+        reply_text = await _handle_show(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "delete_event":
-        reply_text = await _handle_delete(update, user_id, parsed, user_now)
+        reply_text = await _handle_delete(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "remind":
         reply_text = await _handle_remind(update, user_id, parsed, user_now, tz_name)
@@ -103,6 +111,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "🔑 Чтобы подключить календарь, используй команду /auth"
         await update.message.reply_text(reply_text)
 
+    elif intent == "delete_account":
+        reply_text = (
+            "Вот команды для управления аккаунтом:\n\n"
+            "🔌 /disconnect — отключить календарь (аккаунт останется)\n"
+            "🚪 /logout — полное удаление аккаунта и всех данных\n"
+            "🗑️ /deletedata — то же что /logout (GDPR)"
+        )
+        await update.message.reply_text(reply_text)
+
     elif intent == "help":
         reply_text = (
             "🗓️ Вот что я умею:\n\n"
@@ -112,7 +129,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Напоминание — «напомни в 10 утра купить продукты»\n\n"
             "📌 Команды:\n"
             "/auth — подключить календарь\n"
-            "/timezone — сменить часовой пояс\n\n"
+            "/timezone — сменить часовой пояс\n"
+            "/disconnect — отключить календарь\n"
+            "/logout — удалить аккаунт и данные\n\n"
             "Просто пиши как думаешь!"
         )
         await update.message.reply_text(reply_text)
@@ -175,9 +194,9 @@ async def _handle_create(update: Update, user_id, parsed: dict):
         return r
 
 
-# ─── Показ событий ────────────────────────────────────────
+# ─── Показ событий (из БД, после sync) ───────────────────
 
-async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime):
+async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
     period = parsed.get("period", "today")
 
     if period == "tomorrow":
@@ -203,11 +222,15 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
         except ValueError:
             pass
 
-    # Убираем tzinfo для передачи в calendar (он сам добавит timezone)
-    time_min_naive = time_min.replace(tzinfo=None)
-    time_max_naive = time_max.replace(tzinfo=None)
+    # --- Ленивая sync: синхронизируем перед чтением ---
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed for user {user_id}, reading stale data: {e}")
 
-    events = await get_events(user_id, time_min_naive, time_max_naive)
+    # --- Читаем из БД ---
+    # Конвертируем в UTC для запроса (events хранятся в aware datetime)
+    events = await get_events_from_db(user_id, time_min, time_max)
 
     if events is None:
         r = "❌ Ошибка при загрузке событий."
@@ -219,14 +242,15 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
         await update.message.reply_text(r)
         return r
 
+    tz = ZoneInfo(tz_name)
     lines = [f"📅 **Расписание {label}:**\n"]
     for e in events:
-        start = e["start"]
-        try:
-            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            time_fmt = dt.strftime("%H:%M")
-        except Exception:
-            time_fmt = start
+        start = e["start_time"]
+        if start.tzinfo:
+            start_local = start.astimezone(tz)
+        else:
+            start_local = start
+        time_fmt = start_local.strftime("%H:%M")
         lines.append(f"• {time_fmt} — {e['title']}")
 
     r = "\n".join(lines)
@@ -234,9 +258,9 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
     return r
 
 
-# ─── Удаление события ─────────────────────────────────────
+# ─── Удаление события (ищем в БД, удаляем из Google + БД) ─
 
-async def _handle_delete(update: Update, user_id, parsed: dict, user_now: datetime):
+async def _handle_delete(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
     title_query = (parsed.get("title") or "").lower()
 
     if not title_query:
@@ -247,17 +271,14 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
     time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
     time_max = time_min + timedelta(days=7)
 
-    time_min_naive = time_min.replace(tzinfo=None)
-    time_max_naive = time_max.replace(tzinfo=None)
+    # --- Ленивая sync перед поиском ---
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before delete for user {user_id}: {e}")
 
-    events = await get_events(user_id, time_min_naive, time_max_naive, max_results=20)
-
-    if not events:
-        r = "📭 Не нашёл событий для удаления."
-        await update.message.reply_text(r)
-        return r
-
-    matches = [e for e in events if title_query in e["title"].lower()]
+    # --- Ищем в БД ---
+    matches = await find_event_by_title(user_id, title_query, time_min, time_max)
 
     if not matches:
         r = f"🔍 Не нашёл событие \"{parsed.get('title')}\" на ближайшую неделю."
@@ -266,7 +287,16 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
 
     if len(matches) == 1:
         event = matches[0]
-        success = await delete_event(user_id, event["id"])
+        external_id = event.get("external_event_id")
+
+        if external_id:
+            success = await delete_event(user_id, external_id)
+        else:
+            # Событие только в БД (без Google) — мягкое удаление
+            from services.database import soft_delete_event
+            await soft_delete_event(event["id"])
+            success = True
+
         if success:
             r = f"🗑️ Удалено: {event['title']}"
         else:
@@ -274,9 +304,15 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
     else:
+        tz = ZoneInfo(tz_name)
         lines = ["Нашёл несколько совпадений. Какое удалить?\n"]
         for i, e in enumerate(matches, 1):
-            lines.append(f"{i}. {e['title']} — {e['start']}")
+            start = e["start_time"]
+            if start.tzinfo:
+                start_local = start.astimezone(tz)
+            else:
+                start_local = start
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
         r = "\n".join(lines)
         await update.message.reply_text(r)
         return r
@@ -299,7 +335,6 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
 
-    # Собираем дату+время
     if not date_str:
         date_str = user_now.strftime("%Y-%m-%d")
 
@@ -310,20 +345,16 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
 
-    # Делаем aware в timezone пользователя
     tz = ZoneInfo(tz_name)
     remind_at = remind_naive.replace(tzinfo=tz)
 
-    # Проверяем что не в прошлом
     if remind_at <= user_now:
         r = "⏰ Это время уже прошло. Укажи будущее время."
         await update.message.reply_text(r)
         return r
 
-    # Сохраняем в БД
     reminder_id = await save_reminder(user_id, title, remind_at)
 
-    # Форматируем подтверждение
     remind_fmt = remind_naive.strftime("%d.%m.%Y в %H:%M")
     r = f"✅ Напоминание установлено!\n📌 {title}\n⏰ {remind_fmt}"
     await update.message.reply_text(r)

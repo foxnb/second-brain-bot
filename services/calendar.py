@@ -2,6 +2,7 @@
 Revory - Google Calendar Service (Schema v9)
 OAuth через публичный callback URL + CRUD
 Работает с calendar_connections вместо google_token в users
+create_event / delete_event пишут в БД (зеркало)
 """
 
 import json
@@ -24,6 +25,8 @@ from services.database import (
     update_calendar_tokens,
     update_user_email,
     load_timezone,
+    upsert_event,
+    soft_delete_event_by_external_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,7 +39,6 @@ SCOPES = [
 DEFAULT_TZ = "Europe/Moscow"
 
 # telegram_id -> Flow (живёт в памяти пока идёт OAuth)
-# Ключ — telegram_id (не UUID), т.к. state в OAuth = telegram_id
 _pending_flows: dict[int, Flow] = {}
 
 
@@ -138,14 +140,12 @@ async def finish_auth_callback(
         creds = flow.credentials
         token_data = json.loads(creds.to_json())
 
-        # Получаем email из id_token (приходит благодаря scope openid + email)
+        # Получаем email из id_token
         provider_email = None
         if hasattr(creds, "id_token") and creds.id_token:
             try:
-                # id_token — это JWT, парсим payload без верификации (мы доверяем Google)
                 import base64
                 payload = creds.id_token.split(".")[1]
-                # Добавляем padding
                 payload += "=" * (4 - len(payload) % 4)
                 id_info = json.loads(base64.urlsafe_b64decode(payload))
                 provider_email = id_info.get("email")
@@ -179,6 +179,12 @@ async def _get_service(user_id: UUID):
     return build("calendar", "v3", credentials=creds)
 
 
+async def _get_connection_id(user_id: UUID) -> Optional[int]:
+    """Получает connection_id для записи в events."""
+    conn_data = await load_calendar_connection(user_id, provider="google")
+    return conn_data["id"] if conn_data else None
+
+
 async def create_event(
     user_id: UUID,
     title: str,
@@ -204,9 +210,30 @@ async def create_event(
 
     try:
         event = service.events().insert(calendarId="primary", body=event_body).execute()
-        logger.info(f"Created event: {event.get('id')} for user {user_id}")
+        google_event_id = event["id"]
+        logger.info(f"Created Google event: {google_event_id} for user {user_id}")
+
+        # Сохраняем зеркало в БД
+        connection_id = await _get_connection_id(user_id)
+        if connection_id:
+            tz_obj = ZoneInfo(tz)
+            start_aware = start_time.replace(tzinfo=tz_obj)
+            end_aware = end_time.replace(tzinfo=tz_obj)
+
+            await upsert_event(
+                user_id=user_id,
+                calendar_connection_id=connection_id,
+                external_event_id=google_event_id,
+                title=title,
+                start_time=start_aware,
+                end_time=end_aware,
+                timezone=tz,
+                description=description,
+            )
+            logger.info(f"Saved event mirror in DB for {google_event_id}")
+
         return {
-            "id": event["id"],
+            "id": google_event_id,
             "title": event["summary"],
             "start": event["start"]["dateTime"],
             "end": event["end"]["dateTime"],
@@ -217,65 +244,25 @@ async def create_event(
         return None
 
 
-async def get_events(
-    user_id: UUID,
-    time_min: Optional[datetime] = None,
-    time_max: Optional[datetime] = None,
-    max_results: int = 10,
-) -> Optional[list]:
-    service = await _get_service(user_id)
-    if not service:
-        return None
-
-    tz = await _get_user_tz(user_id)
-
-    now = datetime.now()
-    if not time_min:
-        time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if not time_max:
-        time_max = time_min + timedelta(days=1)
-
-    time_min_str = _to_rfc3339(time_min, tz)
-    time_max_str = _to_rfc3339(time_max, tz)
-
-    logger.info(f"get_events: timeMin={time_min_str}, timeMax={time_max_str}, tz={tz}")
-
-    try:
-        result = (
-            service.events()
-            .list(
-                calendarId="primary",
-                timeMin=time_min_str,
-                timeMax=time_max_str,
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
-        events = result.get("items", [])
-        return [
-            {
-                "id": e["id"],
-                "title": e.get("summary", "Без названия"),
-                "start": e["start"].get("dateTime", e["start"].get("date")),
-                "end": e["end"].get("dateTime", e["end"].get("date")),
-            }
-            for e in events
-        ]
-    except Exception as e:
-        logger.error(f"Get events error: {e}")
-        return None
-
-
 async def delete_event(user_id: UUID, event_id: str) -> bool:
+    """
+    Удаляет событие из Google Calendar + мягкое удаление в БД.
+    event_id здесь — это external_event_id (Google Calendar ID).
+    """
     service = await _get_service(user_id)
     if not service:
         return False
 
     try:
         service.events().delete(calendarId="primary", eventId=event_id).execute()
-        logger.info(f"Deleted event {event_id} for user {user_id}")
+        logger.info(f"Deleted Google event {event_id} for user {user_id}")
+
+        # Мягкое удаление в БД
+        connection_id = await _get_connection_id(user_id)
+        if connection_id:
+            await soft_delete_event_by_external_id(connection_id, event_id)
+            logger.info(f"Soft-deleted event mirror {event_id} in DB")
+
         return True
     except Exception as e:
         logger.error(f"Delete event error: {e}")

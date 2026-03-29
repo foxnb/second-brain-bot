@@ -1,6 +1,6 @@
 """
 Revory - Database Service (Schema v9)
-UUID users + auth_methods + calendar_connections
+UUID users + auth_methods + calendar_connections + events mirror
 Supabase (PostgreSQL) через asyncpg
 """
 
@@ -190,14 +190,11 @@ async def save_calendar_connection(
     pool = await get_pool()
 
     # TODO: шифровать токены через Fernet (ENCRYPTION_KEY)
-    # Пока храним как есть — добавим шифрование отдельным шагом
     token_json = json.dumps(token_data)
     refresh_token = token_data.get("refresh_token")
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Ищем существующее подключение для этого провайдера
-            # (NULL-safe: COALESCE обрабатывает NULL email)
             existing = await conn.fetchrow(
                 """
                 SELECT id FROM calendar_connections
@@ -208,7 +205,6 @@ async def save_calendar_connection(
             )
 
             if existing:
-                # Обновляем токены существующего подключения
                 row = await conn.fetchrow(
                     """
                     UPDATE calendar_connections
@@ -216,14 +212,15 @@ async def save_calendar_connection(
                         refresh_token_encrypted = $2,
                         provider_email = COALESCE($3, provider_email),
                         status = 'active',
+                        sync_token = NULL,
                         updated_at = now()
                     WHERE id = $4
                     RETURNING id
                     """,
                     token_json, refresh_token, provider_email, existing["id"],
                 )
+                is_primary = False  # уже существует
             else:
-                # Новое подключение — проверяем нужен ли primary
                 count = await conn.fetchval(
                     "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1",
                     user_id,
@@ -261,7 +258,8 @@ async def load_calendar_connection(
         row = await pool.fetchrow(
             """
             SELECT id, provider, provider_email, access_token_encrypted,
-                   refresh_token_encrypted, calendar_id, is_primary, status
+                   refresh_token_encrypted, calendar_id, is_primary, status,
+                   sync_token
             FROM calendar_connections
             WHERE user_id = $1 AND provider = $2 AND status = 'active'
             ORDER BY is_primary DESC
@@ -274,7 +272,8 @@ async def load_calendar_connection(
         row = await pool.fetchrow(
             """
             SELECT id, provider, provider_email, access_token_encrypted,
-                   refresh_token_encrypted, calendar_id, is_primary, status
+                   refresh_token_encrypted, calendar_id, is_primary, status,
+                   sync_token
             FROM calendar_connections
             WHERE user_id = $1 AND status = 'active'
             ORDER BY is_primary DESC
@@ -294,6 +293,7 @@ async def load_calendar_connection(
         "refresh_token": row["refresh_token_encrypted"],
         "calendar_id": row["calendar_id"],
         "is_primary": row["is_primary"],
+        "sync_token": row["sync_token"],
     }
 
 
@@ -326,17 +326,24 @@ async def update_calendar_tokens(connection_id: int, token_data: dict):
     )
 
 
+async def update_sync_token(connection_id: int, sync_token: Optional[str]):
+    """Обновляет syncToken для инкрементальной синхронизации."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE calendar_connections SET sync_token = $1, updated_at = now() WHERE id = $2",
+        sync_token, connection_id,
+    )
+
+
 async def switch_primary_calendar(user_id: UUID, connection_id: int) -> bool:
     """Переключает primary календарь."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Снимаем primary со всех
             await conn.execute(
                 "UPDATE calendar_connections SET is_primary = FALSE WHERE user_id = $1",
                 user_id,
             )
-            # Ставим на нужный
             result = await conn.execute(
                 """
                 UPDATE calendar_connections
@@ -347,6 +354,176 @@ async def switch_primary_calendar(user_id: UUID, connection_id: int) -> bool:
                 user_id,
             )
     return "UPDATE 1" in result
+
+
+# ─── Events (зеркало) ────────────────────────────────────
+
+async def upsert_event(
+    user_id: UUID,
+    calendar_connection_id: int,
+    external_event_id: str,
+    title: str,
+    start_time: datetime,
+    end_time: datetime,
+    timezone: str,
+    description: str = "",
+    status_id: Optional[int] = None,
+) -> int:
+    """
+    Создаёт или обновляет событие по external_event_id.
+    Возвращает internal event id.
+    """
+    pool = await get_pool()
+
+    # Получаем default status_id если не указан
+    if status_id is None:
+        status_id = await pool.fetchval(
+            """
+            SELECT s.id FROM statuses s
+            JOIN status_models sm ON s.model_id = sm.id
+            WHERE sm.owner_user_id = $1 AND sm.is_default = TRUE
+            AND s.position = 1
+            LIMIT 1
+            """,
+            user_id,
+        )
+        # fallback: первый статус в системе
+        if status_id is None:
+            status_id = await pool.fetchval(
+                "SELECT id FROM statuses WHERE is_system = TRUE AND position = 1 LIMIT 1"
+            )
+
+    row = await pool.fetchrow(
+        """
+        INSERT INTO events
+            (user_id, calendar_connection_id, external_event_id,
+             title, description, start_time, end_time, timezone, status_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (calendar_connection_id, external_event_id)
+            WHERE external_event_id IS NOT NULL
+        DO UPDATE SET
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            start_time = EXCLUDED.start_time,
+            end_time = EXCLUDED.end_time,
+            timezone = EXCLUDED.timezone,
+            is_deleted = FALSE,
+            deleted_at = NULL,
+            updated_at = now()
+        RETURNING id
+        """,
+        user_id, calendar_connection_id, external_event_id,
+        title, description, start_time, end_time, timezone, status_id,
+    )
+    return row["id"]
+
+
+async def soft_delete_event_by_external_id(
+    calendar_connection_id: int,
+    external_event_id: str,
+):
+    """Мягкое удаление по external_event_id (при sync — событие удалено в Google)."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE events
+        SET is_deleted = TRUE, deleted_at = now(), updated_at = now()
+        WHERE calendar_connection_id = $1 AND external_event_id = $2
+          AND is_deleted = FALSE
+        """,
+        calendar_connection_id, external_event_id,
+    )
+
+
+async def soft_delete_event(event_id: int):
+    """Мягкое удаление по internal id (при удалении через бота)."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE events
+        SET is_deleted = TRUE, deleted_at = now(), updated_at = now()
+        WHERE id = $1
+        """,
+        event_id,
+    )
+
+
+async def get_events_from_db(
+    user_id: UUID,
+    time_min: datetime,
+    time_max: datetime,
+    limit: int = 50,
+) -> list[dict]:
+    """Читает события из БД за период."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, external_event_id, title, description,
+               start_time, end_time, timezone
+        FROM events
+        WHERE user_id = $1
+          AND start_time >= $2
+          AND start_time < $3
+          AND is_deleted = FALSE
+        ORDER BY start_time
+        LIMIT $4
+        """,
+        user_id, time_min, time_max, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def find_event_by_title(
+    user_id: UUID,
+    title_query: str,
+    time_min: datetime,
+    time_max: datetime,
+    limit: int = 20,
+) -> list[dict]:
+    """Ищет события по подстроке в названии."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, external_event_id, calendar_connection_id,
+               title, start_time, end_time
+        FROM events
+        WHERE user_id = $1
+          AND LOWER(title) LIKE '%' || LOWER($2) || '%'
+          AND start_time >= $3
+          AND start_time < $4
+          AND is_deleted = FALSE
+        ORDER BY start_time
+        LIMIT $5
+        """,
+        user_id, title_query, time_min, time_max, limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_connection_id_for_event(event_id: int) -> Optional[int]:
+    """Получает calendar_connection_id по event id."""
+    pool = await get_pool()
+    return await pool.fetchval(
+        "SELECT calendar_connection_id FROM events WHERE id = $1",
+        event_id,
+    )
+
+
+async def cleanup_deleted_events(days: int = 30) -> int:
+    """Физически удаляет события, удалённые более N дней назад."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        DELETE FROM events
+        WHERE is_deleted = TRUE
+          AND deleted_at < now() - make_interval(days => $1)
+        """,
+        days,
+    )
+    count = int(result.split()[-1]) if result else 0
+    if count > 0:
+        logger.info(f"Cleaned up {count} deleted events older than {days} days")
+    return count
 
 
 # ─── Reminders ─────────────────────────────────────────────
@@ -436,6 +613,9 @@ async def logout_user(user_id: UUID) -> dict:
             )
             stats["messages"] = await conn.fetchval(
                 "SELECT COUNT(*) FROM messages WHERE user_id = $1", user_id
+            )
+            stats["events"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM events WHERE user_id = $1", user_id
             )
             stats["calendars"] = await conn.fetchval(
                 "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1", user_id

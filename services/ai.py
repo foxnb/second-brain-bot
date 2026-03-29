@@ -22,7 +22,7 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 Верни ТОЛЬКО JSON (без markdown, без ```), строго по формату:
 
 {{
-  "intent": "create_event" | "show_events" | "delete_event" | "remind" | "change_timezone" | "connect_calendar" | "help" | "chitchat" | "unknown",
+  "intent": "create_event" | "show_events" | "delete_event" | "remind" | "change_timezone" | "connect_calendar" | "delete_account" | "help" | "chitchat" | "unknown",
   "title": "название события" или null,
   "date": "YYYY-MM-DD" или null,
   "time": "HH:MM" или null,
@@ -38,6 +38,7 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 - remind — поставить напоминание: "напомни позвонить", "не забудь купить", "remind me"
 - change_timezone — узнать или сменить часовой пояс: "поменяй часовой пояс", "какой у меня часовой пояс", "мой timezone", "сменить timezone", "+1", "UTC+3"
 - connect_calendar — подключить календарь: "подключить гугл", "connect calendar", "авторизация"
+- delete_account — удалить аккаунт/данные/выйти: "удалить аккаунт", "удали мои данные", "как удалить", "выйти", "logout", "разлогиниться", "отключить аккаунт"
 - help — помощь: "что ты умеешь", "помощь", "help", "как пользоваться"
 - chitchat — болтовня: "привет", "как дела", "спасибо", приветствия и вежливости
 - unknown — если вообще не понял о чём речь
