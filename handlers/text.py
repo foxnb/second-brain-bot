@@ -28,6 +28,13 @@ from services.database import (
     get_events_from_db,
     find_event_by_title,
     soft_delete_event,
+    create_list,
+    find_list_by_name,
+    get_user_lists,
+    add_list_items,
+    get_list_items,
+    check_list_items,
+    remove_list_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,15 +109,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _clear_pending(user_id)
 
     # --- Проверка: подключён ли календарь ---
-    logger.info(f"Checking credentials for user_id={user_id} (telegram={telegram_id})")
-    creds = await get_credentials(user_id)
-    if not creds:
-        logger.warning(f"No credentials found for user_id={user_id}")
-        await update.message.reply_text(
-            "🔑 Сначала подключи Google Calendar.\n"
-            "Нажми /auth чтобы начать."
-        )
-        return
+    # (отложим до момента когда intent требует календарь)
 
     # --- Получаем timezone пользователя ---
     user_now, tz_name = await _get_user_now(user_id)
@@ -128,6 +127,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Сохраняем сообщение пользователя ---
     await save_message(user_id, "user", text)
 
+    # --- Интенты, требующие Google Calendar ---
+    CALENDAR_INTENTS = {"create_event", "show_events", "delete_event"}
+    if intent in CALENDAR_INTENTS:
+        logger.info(f"Checking credentials for user_id={user_id} (telegram={telegram_id})")
+        creds = await get_credentials(user_id)
+        if not creds:
+            logger.warning(f"No credentials found for user_id={user_id}")
+            await update.message.reply_text(
+                "🔑 Сначала подключи Google Calendar.\n"
+                "Нажми /auth чтобы начать."
+            )
+            return
+
     # --- Роутинг по intent ---
     reply_text = None
 
@@ -142,6 +154,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "remind":
         reply_text = await _handle_remind(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "create_list":
+        reply_text = await _handle_create_list(update, user_id, parsed, user_now)
+
+    elif intent == "add_to_list":
+        reply_text = await _handle_add_to_list(update, user_id, parsed)
+
+    elif intent == "show_list":
+        reply_text = await _handle_show_list(update, user_id, parsed)
+
+    elif intent == "check_items":
+        reply_text = await _handle_check_items(update, user_id, parsed)
+
+    elif intent == "remove_from_list":
+        reply_text = await _handle_remove_from_list(update, user_id, parsed)
+
+    elif intent == "show_lists":
+        reply_text = await _handle_show_lists(update, user_id)
 
     elif intent == "change_timezone":
         tz_name_current = await load_timezone(user_id)
@@ -205,6 +235,12 @@ async def _handle_pending(update: Update, user_id, text: str, pending: dict) -> 
     if action == "delete_choice":
         return await _handle_delete_choice(update, user_id, text, pending)
 
+    if action == "create_list_confirm":
+        return await _handle_create_list_confirm(update, user_id, text, pending)
+
+    if action == "add_to_list_choice":
+        return await _handle_add_to_list_choice(update, user_id, text, pending)
+
     return False
 
 
@@ -257,7 +293,81 @@ async def _handle_delete_choice(update: Update, user_id, text: str, pending: dic
     return True
 
 
-def _extract_number(text: str) -> int | None:
+async def _handle_create_list_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Обрабатывает подтверждение создания нового списка."""
+    lower = text.lower().strip()
+
+    if lower in ("да", "yes", "ага", "давай", "создай", "ок"):
+        list_name = pending["list_name"]
+        list_type = pending["list_type"]
+        items = pending.get("items", [])
+
+        list_id = await create_list(
+            user_id=user_id,
+            name=list_name,
+            list_type=list_type,
+            icon="🛒" if list_type == "checklist" else "📋",
+        )
+
+        if items:
+            await add_list_items(list_id, items, added_by=user_id)
+
+        _clear_pending(user_id)
+        items_str = ", ".join(items) if items else ""
+        r = f"✅ Создан список \"{list_name}\""
+        if items_str:
+            r += f" и добавлено: {items_str}"
+
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    elif lower in ("нет", "no", "не надо", "отмена", "cancel"):
+        _clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    return False
+
+
+async def _handle_add_to_list_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Обрабатывает выбор списка для добавления."""
+    matches = pending.get("matches", [])
+    items = pending.get("items", [])
+
+    number = _extract_number(text)
+    if number is None:
+        lower = text.lower().strip()
+        if lower in ("отмена", "отмени", "нет", "cancel"):
+            _clear_pending(user_id)
+            r = "👌 Отменено."
+            await update.message.reply_text(r)
+            await save_message(user_id, "user", text)
+            await save_message(user_id, "assistant", r)
+            return True
+        return False
+
+    if number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    target = matches[number - 1]
+    await add_list_items(target["id"], items, added_by=user_id)
+    _clear_pending(user_id)
+
+    items_str = ", ".join(items)
+    r = f"✅ Добавлено в \"{target['name']}\": {items_str}"
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
     """Извлекает число из текста: '1', 'удали 2', 'третий'."""
     import re
 
@@ -520,5 +630,274 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
 
     remind_fmt = remind_naive.strftime("%d.%m.%Y в %H:%M")
     r = f"✅ Напоминание установлено!\n📌 {title}\n⏰ {remind_fmt}"
+    await update.message.reply_text(r)
+    return r
+
+
+# ─── Списки ───────────────────────────────────────────────
+
+async def _handle_create_list(update: Update, user_id, parsed: dict, user_now: datetime):
+    """Создаёт новый список с элементами."""
+    name = parsed.get("list_name") or parsed.get("title") or "Список"
+    list_type = parsed.get("list_type") or "checklist"
+    items = parsed.get("items") or []
+    date_str = parsed.get("date")
+
+    # Определяем target_date и auto_archive для чеклистов
+    target_date = None
+    auto_archive_at = None
+
+    if list_type == "checklist":
+        if date_str:
+            try:
+                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = user_now.date()
+        else:
+            target_date = user_now.date()
+
+        # Автоархивация: конец следующего дня
+        from datetime import date as date_type
+        archive_date = target_date + timedelta(days=1)
+        auto_archive_at = datetime(
+            archive_date.year, archive_date.month, archive_date.day,
+            tzinfo=user_now.tzinfo,
+        )
+
+    # Иконка по типу
+    icon = "🛒" if list_type == "checklist" else "📋"
+
+    list_id = await create_list(
+        user_id=user_id,
+        name=name.capitalize(),
+        list_type=list_type,
+        target_date=target_date,
+        auto_archive_at=auto_archive_at,
+        icon=icon,
+    )
+
+    if items:
+        await add_list_items(list_id, items, added_by=user_id)
+
+    item_text = f" ({len(items)} поз.)" if items else ""
+    type_label = "Список" if list_type == "checklist" else "Коллекция"
+    r = f"{icon} {type_label} \"{name.capitalize()}\" создан{item_text}"
+
+    if items and len(items) <= 10:
+        r += "\n" + "\n".join(f"  ☐ {item}" for item in items)
+
+    await update.message.reply_text(r)
+    return r
+
+
+async def _handle_add_to_list(update: Update, user_id, parsed: dict):
+    """Добавляет элементы в существующий список."""
+    list_name = parsed.get("list_name") or ""
+    items = parsed.get("items") or []
+    list_type = parsed.get("list_type")
+
+    if not items:
+        r = "🤔 Что добавить? Напиши, например: «добавь яблоки в покупки»"
+        await update.message.reply_text(r)
+        return r
+
+    if not list_name:
+        r = "🤔 В какой список добавить? Напиши, например: «добавь яблоки в покупки»"
+        await update.message.reply_text(r)
+        return r
+
+    # Ищем список
+    matches = await find_list_by_name(user_id, list_name, list_type=list_type)
+
+    if not matches:
+        # Списка нет — предлагаем создать
+        _set_pending(user_id, "create_list_confirm", {
+            "list_name": list_name.capitalize(),
+            "list_type": list_type or "checklist",
+            "items": items,
+        })
+        type_label = "коллекцию" if list_type == "collection" else "список"
+        r = f"📝 Список \"{list_name}\" не найден. Создать {type_label} \"{list_name.capitalize()}\"?\n\nНапиши «да» или «нет»."
+        await update.message.reply_text(r)
+        return r
+
+    if len(matches) == 1:
+        target = matches[0]
+    else:
+        # Несколько совпадений — предлагаем выбрать
+        lines = ["Нашла несколько списков:\n"]
+        for i, m in enumerate(matches, 1):
+            lines.append(f"{i}. {m.get('icon', '📋')} {m['name']}")
+        lines.append("\nНапиши номер.")
+
+        _set_pending(user_id, "add_to_list_choice", {
+            "matches": matches,
+            "items": items,
+        })
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    await add_list_items(target["id"], items, added_by=user_id)
+    items_str = ", ".join(items)
+    r = f"✅ Добавлено в \"{target['name']}\": {items_str}"
+    await update.message.reply_text(r)
+    return r
+
+
+async def _handle_show_list(update: Update, user_id, parsed: dict):
+    """Показывает содержимое списка."""
+    list_name = parsed.get("list_name") or ""
+
+    if not list_name:
+        # Показываем все активные списки
+        return await _handle_show_lists(update, user_id)
+
+    matches = await find_list_by_name(user_id, list_name)
+
+    if not matches:
+        r = f"📭 Список \"{list_name}\" не найден."
+        await update.message.reply_text(r)
+        return r
+
+    target = matches[0]
+    items = await get_list_items(target["id"])
+
+    if not items:
+        r = f"{target.get('icon', '📋')} \"{target['name']}\" — пусто."
+        await update.message.reply_text(r)
+        return r
+
+    icon = target.get("icon", "📋")
+    lines = [f"{icon} {target['name']}:\n"]
+
+    for item in items:
+        if target["list_type"] == "checklist":
+            mark = "✅" if item["is_checked"] else "☐"
+        else:
+            mark = "•"
+        lines.append(f"  {mark} {item['content']}")
+
+    # Статистика для чеклистов
+    if target["list_type"] == "checklist":
+        total = len(items)
+        checked = sum(1 for i in items if i["is_checked"])
+        if checked > 0:
+            lines.append(f"\n{checked}/{total} выполнено")
+
+    r = "\n".join(lines)
+    await update.message.reply_text(r)
+    return r
+
+
+async def _handle_check_items(update: Update, user_id, parsed: dict):
+    """Отмечает элементы как выполненные."""
+    items = parsed.get("items") or []
+    list_name = parsed.get("list_name")
+
+    if not items:
+        r = "🤔 Что отметить? Напиши, например: «взяла молоко»"
+        await update.message.reply_text(r)
+        return r
+
+    # Если list_name не указан — ищем активные чеклисты
+    if list_name:
+        matches = await find_list_by_name(user_id, list_name, list_type="checklist")
+    else:
+        matches = await get_user_lists(user_id, list_type="checklist")
+
+    if not matches:
+        r = "📭 Нет активных списков."
+        await update.message.reply_text(r)
+        return r
+
+    # Пробуем отметить в каждом активном чеклисте
+    all_checked = []
+    for lst in matches:
+        checked = await check_list_items(lst["id"], items, checked_by=user_id)
+        for c in checked:
+            all_checked.append((lst["name"], c))
+
+    if all_checked:
+        names = ", ".join(c[1] for c in all_checked)
+        r = f"✅ Готово: {names}"
+
+        # Проверяем: всё ли выполнено?
+        if len(matches) == 1:
+            remaining = await get_list_items(matches[0]["id"], include_checked=False)
+            if not remaining:
+                r += f"\n\n🎉 Список \"{matches[0]['name']}\" полностью выполнен!"
+            elif len(remaining) <= 3:
+                left = ", ".join(i["content"] for i in remaining)
+                r += f"\nОсталось: {left}"
+    else:
+        names = ", ".join(items)
+        r = f"🔍 Не нашла \"{names}\" в активных списках."
+
+    await update.message.reply_text(r)
+    return r
+
+
+async def _handle_remove_from_list(update: Update, user_id, parsed: dict):
+    """Удаляет элементы из списка."""
+    items = parsed.get("items") or []
+    list_name = parsed.get("list_name")
+
+    if not items:
+        r = "🤔 Что убрать? Напиши, например: «удали молоко из покупок»"
+        await update.message.reply_text(r)
+        return r
+
+    if list_name:
+        matches = await find_list_by_name(user_id, list_name)
+    else:
+        matches = await get_user_lists(user_id)
+
+    if not matches:
+        r = "📭 Нет активных списков."
+        await update.message.reply_text(r)
+        return r
+
+    all_removed = []
+    for lst in matches:
+        removed = await remove_list_items(lst["id"], items)
+        for rm in removed:
+            all_removed.append(rm)
+
+    if all_removed:
+        names = ", ".join(all_removed)
+        r = f"🗑 Убрано: {names}"
+    else:
+        names = ", ".join(items)
+        r = f"🔍 Не нашла \"{names}\" в списках."
+
+    await update.message.reply_text(r)
+    return r
+
+
+async def _handle_show_lists(update: Update, user_id):
+    """Показывает все активные списки пользователя."""
+    lists = await get_user_lists(user_id)
+
+    if not lists:
+        r = "📭 У тебя пока нет списков. Напиши, например: «список покупок: молоко, хлеб»"
+        await update.message.reply_text(r)
+        return r
+
+    lines = ["📋 Твои списки:\n"]
+    for lst in lists:
+        icon = lst.get("icon") or "📋"
+        name = lst["name"]
+        item_count = lst.get("item_count", 0)
+        checked_count = lst.get("checked_count", 0)
+
+        if lst["list_type"] == "checklist" and item_count > 0:
+            lines.append(f"  {icon} {name} — {checked_count}/{item_count} выполнено")
+        elif item_count > 0:
+            lines.append(f"  {icon} {name} — {item_count} элементов")
+        else:
+            lines.append(f"  {icon} {name}")
+
+    r = "\n".join(lines)
     await update.message.reply_text(r)
     return r

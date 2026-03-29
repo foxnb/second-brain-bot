@@ -641,3 +641,269 @@ async def get_calendar_tokens_for_revoke(user_id: UUID) -> list[dict]:
         except Exception:
             pass
     return result
+
+
+# ─── Lists ─────────────────────────────────────────────────
+
+async def create_list(
+    user_id: UUID,
+    name: str,
+    list_type: str = "checklist",
+    target_date=None,
+    auto_archive_at=None,
+    icon: str = None,
+    settings: dict = None,
+) -> int:
+    """Создаёт список. Возвращает list_id."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO lists (user_id, name, list_type, target_date, auto_archive_at, icon, settings)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        user_id, name, list_type, target_date, auto_archive_at,
+        icon, json.dumps(settings) if settings else None,
+    )
+    logger.info(f"Created list '{name}' (type={list_type}) for user {user_id}, id={row['id']}")
+    return row["id"]
+
+
+async def find_list_by_name(
+    user_id: UUID,
+    query: str,
+    list_type: str = None,
+    status: str = "active",
+) -> list[dict]:
+    """Ищет списки по подстроке в имени."""
+    pool = await get_pool()
+    if list_type:
+        rows = await pool.fetch(
+            """
+            SELECT id, name, list_type, target_date, icon, status, auto_archive_at
+            FROM lists
+            WHERE user_id = $1 AND LOWER(name) LIKE '%' || LOWER($2) || '%'
+              AND list_type = $3 AND status = $4
+            ORDER BY updated_at DESC
+            """,
+            user_id, query, list_type, status,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, name, list_type, target_date, icon, status, auto_archive_at
+            FROM lists
+            WHERE user_id = $1 AND LOWER(name) LIKE '%' || LOWER($2) || '%'
+              AND status = $3
+            ORDER BY updated_at DESC
+            """,
+            user_id, query, status,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_list_by_id(list_id: int) -> Optional[dict]:
+    """Загружает список по ID."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, user_id, name, list_type, target_date, icon, status FROM lists WHERE id = $1",
+        list_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_user_lists(
+    user_id: UUID,
+    list_type: str = None,
+    status: str = "active",
+) -> list[dict]:
+    """Все списки пользователя (опционально по типу)."""
+    pool = await get_pool()
+    if list_type:
+        rows = await pool.fetch(
+            """
+            SELECT l.id, l.name, l.list_type, l.target_date, l.icon, l.status,
+                   COUNT(li.id) FILTER (WHERE li.is_deleted = FALSE) AS item_count,
+                   COUNT(li.id) FILTER (WHERE li.is_checked = TRUE AND li.is_deleted = FALSE) AS checked_count
+            FROM lists l
+            LEFT JOIN list_items li ON li.list_id = l.id
+            WHERE l.user_id = $1 AND l.list_type = $2 AND l.status = $3
+            GROUP BY l.id
+            ORDER BY l.updated_at DESC
+            """,
+            user_id, list_type, status,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT l.id, l.name, l.list_type, l.target_date, l.icon, l.status,
+                   COUNT(li.id) FILTER (WHERE li.is_deleted = FALSE) AS item_count,
+                   COUNT(li.id) FILTER (WHERE li.is_checked = TRUE AND li.is_deleted = FALSE) AS checked_count
+            FROM lists l
+            LEFT JOIN list_items li ON li.list_id = l.id
+            WHERE l.user_id = $1 AND l.status = $2
+            GROUP BY l.id
+            ORDER BY l.updated_at DESC
+            """,
+            user_id, status,
+        )
+    return [dict(r) for r in rows]
+
+
+async def add_list_items(
+    list_id: int,
+    items: list[str],
+    added_by: UUID = None,
+) -> list[int]:
+    """Добавляет элементы в список. Возвращает список ID."""
+    pool = await get_pool()
+
+    # Получаем текущий max position
+    max_pos = await pool.fetchval(
+        "SELECT COALESCE(MAX(position), 0) FROM list_items WHERE list_id = $1",
+        list_id,
+    )
+
+    ids = []
+    for i, content in enumerate(items):
+        item_id = await pool.fetchval(
+            """
+            INSERT INTO list_items (list_id, added_by, content, position)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            """,
+            list_id, added_by, content, max_pos + i + 1,
+        )
+        ids.append(item_id)
+
+    # Обновляем updated_at списка
+    await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
+
+    logger.info(f"Added {len(ids)} items to list {list_id}")
+    return ids
+
+
+async def get_list_items(
+    list_id: int,
+    include_checked: bool = True,
+) -> list[dict]:
+    """Элементы списка."""
+    pool = await get_pool()
+    if include_checked:
+        rows = await pool.fetch(
+            """
+            SELECT id, content, metadata, is_checked, checked_at, position
+            FROM list_items
+            WHERE list_id = $1 AND is_deleted = FALSE
+            ORDER BY is_checked, position
+            """,
+            list_id,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, content, metadata, is_checked, checked_at, position
+            FROM list_items
+            WHERE list_id = $1 AND is_deleted = FALSE AND is_checked = FALSE
+            ORDER BY position
+            """,
+            list_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def check_list_items(
+    list_id: int,
+    item_queries: list[str],
+    checked_by: UUID = None,
+) -> list[str]:
+    """
+    Отмечает элементы как выполненные по подстроке.
+    Возвращает список отмеченных названий.
+    """
+    pool = await get_pool()
+    checked = []
+
+    for query in item_queries:
+        row = await pool.fetchrow(
+            """
+            UPDATE list_items
+            SET is_checked = TRUE, checked_at = now(), checked_by = $3
+            WHERE list_id = $1
+              AND LOWER(content) LIKE '%' || LOWER($2) || '%'
+              AND is_checked = FALSE AND is_deleted = FALSE
+            RETURNING content
+            """,
+            list_id, query, checked_by,
+        )
+        if row:
+            checked.append(row["content"])
+
+    if checked:
+        await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
+
+    return checked
+
+
+async def remove_list_items(
+    list_id: int,
+    item_queries: list[str],
+) -> list[str]:
+    """
+    Мягко удаляет элементы по подстроке.
+    Возвращает список удалённых названий.
+    """
+    pool = await get_pool()
+    removed = []
+
+    for query in item_queries:
+        row = await pool.fetchrow(
+            """
+            UPDATE list_items
+            SET is_deleted = TRUE
+            WHERE list_id = $1
+              AND LOWER(content) LIKE '%' || LOWER($2) || '%'
+              AND is_deleted = FALSE
+            RETURNING content
+            """,
+            list_id, query,
+        )
+        if row:
+            removed.append(row["content"])
+
+    if removed:
+        await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
+
+    return removed
+
+
+async def archive_expired_lists() -> int:
+    """Архивирует списки с истёкшим auto_archive_at."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE lists SET status = 'archived', updated_at = now()
+        WHERE auto_archive_at <= now() AND status = 'active'
+        """
+    )
+    count = int(result.split()[-1]) if result else 0
+    if count > 0:
+        logger.info(f"Archived {count} expired lists")
+    return count
+
+
+async def cleanup_archived_lists(days: int = 30) -> int:
+    """Физически удаляет списки, заархивированные более N дней назад."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        DELETE FROM lists
+        WHERE status = 'archived'
+          AND updated_at < now() - make_interval(days => $1)
+        """,
+        days,
+    )
+    count = int(result.split()[-1]) if result else 0
+    if count > 0:
+        logger.info(f"Cleaned up {count} archived lists older than {days} days")
+    return count
