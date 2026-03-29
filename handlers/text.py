@@ -2,6 +2,7 @@
 Revory — Text Handler (Schema v9)
 Роутер: принимает текст → AI парсит → вызывает calendar.
 show_events читает из БД (после ленивой sync).
+Поддержка мультишаговых диалогов (pending actions).
 """
 
 import logging
@@ -26,11 +27,44 @@ from services.database import (
     get_recent_messages,
     get_events_from_db,
     find_event_by_title,
+    soft_delete_event,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TZ = "Europe/Moscow"
+
+# ─── Pending Actions (мультишаговые диалоги) ──────────────
+# user_id → {"action": "delete_choice", "matches": [...], "expires": datetime}
+_pending_actions: dict[str, dict] = {}
+
+PENDING_TTL_MINUTES = 5  # Время жизни pending action
+
+
+def _set_pending(user_id, action: str, data: dict):
+    """Сохраняет pending action для пользователя."""
+    _pending_actions[str(user_id)] = {
+        "action": action,
+        **data,
+        "expires": datetime.now(dt_timezone.utc) + timedelta(minutes=PENDING_TTL_MINUTES),
+    }
+
+
+def _get_pending(user_id) -> dict | None:
+    """Возвращает pending action если не истёк."""
+    key = str(user_id)
+    pending = _pending_actions.get(key)
+    if not pending:
+        return None
+    if datetime.now(dt_timezone.utc) > pending["expires"]:
+        del _pending_actions[key]
+        return None
+    return pending
+
+
+def _clear_pending(user_id):
+    """Удаляет pending action."""
+    _pending_actions.pop(str(user_id), None)
 
 
 async def _resolve_user(telegram_id: int):
@@ -56,6 +90,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_id:
         await update.message.reply_text("❌ Ошибка: пользователь не найден. Нажми /start")
         return
+
+    # --- Проверяем pending action (мультишаговый диалог) ---
+    pending = _get_pending(user_id)
+    if pending:
+        handled = await _handle_pending(update, user_id, text, pending)
+        if handled:
+            return
+        # Если не обработали — продолжаем обычный flow
+        # (пользователь написал что-то другое вместо выбора)
+        _clear_pending(user_id)
 
     # --- Проверка: подключён ли календарь ---
     logger.info(f"Checking credentials for user_id={user_id} (telegram={telegram_id})")
@@ -149,6 +193,98 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_message(user_id, "assistant", reply_text)
 
 
+# ─── Pending Actions Handler ──────────────────────────────
+
+async def _handle_pending(update: Update, user_id, text: str, pending: dict) -> bool:
+    """
+    Обрабатывает ответ на pending action.
+    Возвращает True если обработали, False если это не ответ на pending.
+    """
+    action = pending.get("action")
+
+    if action == "delete_choice":
+        return await _handle_delete_choice(update, user_id, text, pending)
+
+    return False
+
+
+async def _handle_delete_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Обрабатывает выбор номера для удаления."""
+    matches = pending.get("matches", [])
+
+    # Пробуем извлечь номер из текста: "1", "удали 1", "первый"
+    number = _extract_number(text)
+    if number is None:
+        # Проверяем отмену
+        lower = text.lower().strip()
+        if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+            _clear_pending(user_id)
+            r = "👌 Отменено."
+            await update.message.reply_text(r)
+            await save_message(user_id, "user", text)
+            await save_message(user_id, "assistant", r)
+            return True
+        # Не число и не отмена — не наш ответ
+        return False
+
+    if number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Удаляем выбранное событие
+    event = matches[number - 1]
+    external_id = event.get("external_event_id")
+
+    if external_id:
+        success = await delete_event(user_id, external_id)
+    else:
+        await soft_delete_event(event["id"])
+        success = True
+
+    _clear_pending(user_id)
+
+    if success:
+        r = f"🗑️ Удалено: {event['title']}"
+    else:
+        r = "❌ Не удалось удалить. Попробуй позже."
+
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+def _extract_number(text: str) -> int | None:
+    """Извлекает число из текста: '1', 'удали 2', 'третий'."""
+    import re
+
+    # Словесные числительные
+    words_to_num = {
+        "первый": 1, "первое": 1, "первая": 1, "первую": 1,
+        "второй": 2, "второе": 2, "вторая": 2, "вторую": 2,
+        "третий": 3, "третье": 3, "третья": 3, "третью": 3,
+        "четвёртый": 4, "четвертый": 4, "четвёртое": 4, "четвертое": 4,
+        "пятый": 5, "пятое": 5, "пятая": 5,
+    }
+
+    lower = text.lower().strip()
+
+    # Сначала проверяем словесные
+    for word, num in words_to_num.items():
+        if word in lower:
+            return num
+
+    # Потом ищем цифры
+    match = re.search(r"\d+", lower)
+    if match:
+        return int(match.group())
+
+    return None
+
+
 # ─── Создание события ─────────────────────────────────────
 
 async def _handle_create(update: Update, user_id, parsed: dict):
@@ -229,7 +365,6 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
         logger.error(f"Sync failed for user {user_id}, reading stale data: {e}")
 
     # --- Читаем из БД ---
-    # Конвертируем в UTC для запроса (events хранятся в aware datetime)
     events = await get_events_from_db(user_id, time_min, time_max)
 
     if events is None:
@@ -243,7 +378,7 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
         return r
 
     tz = ZoneInfo(tz_name)
-    lines = [f"📅 **Расписание {label}:**\n"]
+    lines = [f"📅 Расписание {label}:\n"]
     for e in events:
         start = e["start_time"]
         if start.tzinfo:
@@ -254,7 +389,7 @@ async def _handle_show(update: Update, user_id, parsed: dict, user_now: datetime
         lines.append(f"• {time_fmt} — {e['title']}")
 
     r = "\n".join(lines)
-    await update.message.reply_text(r, parse_mode="Markdown")
+    await update.message.reply_text(r)
     return r
 
 
@@ -268,8 +403,30 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
 
-    time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    time_max = time_min + timedelta(days=7)
+    # --- Определяем временной диапазон ---
+    # Если AI указал конкретную дату — ищем за этот день
+    # Если указал period — за этот период
+    # Иначе — за ближайшую неделю
+    date_str = parsed.get("date")
+    period = parsed.get("period")
+
+    if date_str:
+        try:
+            day = datetime.strptime(date_str, "%Y-%m-%d")
+            time_min = day.replace(hour=0, minute=0, second=0, tzinfo=user_now.tzinfo)
+            time_max = time_min + timedelta(days=1)
+        except ValueError:
+            time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            time_max = time_min + timedelta(days=7)
+    elif period == "today":
+        time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_max = time_min + timedelta(days=1)
+    elif period == "tomorrow":
+        time_min = (user_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time_max = time_min + timedelta(days=1)
+    else:
+        time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_max = time_min + timedelta(days=7)
 
     # --- Ленивая sync перед поиском ---
     try:
@@ -281,7 +438,7 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
     matches = await find_event_by_title(user_id, title_query, time_min, time_max)
 
     if not matches:
-        r = f"🔍 Не нашёл событие \"{parsed.get('title')}\" на ближайшую неделю."
+        r = f"🔍 Не нашла событие \"{parsed.get('title')}\" на ближайшую неделю."
         await update.message.reply_text(r)
         return r
 
@@ -292,8 +449,6 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         if external_id:
             success = await delete_event(user_id, external_id)
         else:
-            # Событие только в БД (без Google) — мягкое удаление
-            from services.database import soft_delete_event
             await soft_delete_event(event["id"])
             success = True
 
@@ -304,8 +459,9 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
     else:
+        # Несколько совпадений — сохраняем pending action и просим выбрать
         tz = ZoneInfo(tz_name)
-        lines = ["Нашёл несколько совпадений. Какое удалить?\n"]
+        lines = ["Нашла несколько совпадений. Какое удалить?\n"]
         for i, e in enumerate(matches, 1):
             start = e["start_time"]
             if start.tzinfo:
@@ -313,6 +469,13 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
             else:
                 start_local = start
             lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+
+        # Сохраняем список для обработки следующего сообщения
+        _set_pending(user_id, "delete_choice", {
+            "matches": matches,
+        })
+
         r = "\n".join(lines)
         await update.message.reply_text(r)
         return r
