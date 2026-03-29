@@ -306,7 +306,8 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── /disconnect — отключить календарь ────────────────────
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = await _get_uid(update)
+    telegram_id = update.message.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
     if not user_id:
         await update.message.reply_text("❌ Ты ещё не зарегистрирован. Нажми /start")
         return
@@ -324,7 +325,8 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── /logout — полный выход ───────────────────────────────
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = await _get_uid(update)
+    telegram_id = update.message.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
     if not user_id:
         await update.message.reply_text("❌ Ты ещё не зарегистрирован.")
         return
