@@ -5,6 +5,7 @@ show_events читает из БД (после ленивой sync).
 Поддержка мультишаговых диалогов (pending actions).
 """
 
+import re
 import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo
@@ -74,6 +75,57 @@ def _clear_pending(user_id):
     _pending_actions.pop(str(user_id), None)
 
 
+def _extract_number(text: str) -> int | None:
+    """Извлекает число из текста: '1', 'удали 2', 'третий'."""
+    # Словесные числительные
+    words_to_num = {
+        "первый": 1, "первое": 1, "первая": 1, "первую": 1,
+        "второй": 2, "второе": 2, "вторая": 2, "вторую": 2,
+        "третий": 3, "третье": 3, "третья": 3, "третью": 3,
+        "четвёртый": 4, "четвертый": 4, "четвёртое": 4, "четвертое": 4,
+        "пятый": 5, "пятое": 5, "пятая": 5,
+    }
+
+    lower = text.lower().strip()
+
+    # Сначала проверяем словесные
+    for word, num in words_to_num.items():
+        if word in lower:
+            return num
+
+    # Потом ищем цифры
+    match = re.search(r"\d+", lower)
+    if match:
+        return int(match.group())
+
+    return None
+
+
+def _format_date_label(target_date, user_now: datetime) -> str:
+    """Форматирует дату для отображения: 'на сегодня', 'на завтра', 'на 31.03'."""
+    if target_date is None:
+        return ""
+    today = user_now.date()
+    tomorrow = today + timedelta(days=1)
+    if target_date == today:
+        return " на сегодня"
+    elif target_date == tomorrow:
+        return " на завтра"
+    else:
+        return f" на {target_date.strftime('%d.%m')}"
+
+
+def _make_checklist_name(base_name: str, target_date, user_now: datetime) -> str:
+    """
+    Добавляет дату в название чеклиста: 'Покупки' → 'Покупки 30.03'.
+    Позволяет иметь несколько чеклистов на разные дни.
+    """
+    if target_date is None:
+        return base_name
+    date_str = target_date.strftime("%d.%m")
+    return f"{base_name} {date_str}"
+
+
 async def _resolve_user(telegram_id: int):
     """Получает UUID по telegram_id."""
     return await get_internal_user_id(telegram_id)
@@ -107,9 +159,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если не обработали — продолжаем обычный flow
         # (пользователь написал что-то другое вместо выбора)
         _clear_pending(user_id)
-
-    # --- Проверка: подключён ли календарь ---
-    # (отложим до момента когда intent требует календарь)
 
     # --- Получаем timezone пользователя ---
     user_now, tz_name = await _get_user_now(user_id)
@@ -200,7 +249,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Создать событие — «встреча завтра в 15:00 с клиентом»\n"
             "• Показать расписание — «что у меня сегодня?»\n"
             "• Удалить событие — «удали встречу с клиентом»\n"
-            "• Напоминание — «напомни в 10 утра купить продукты»\n\n"
+            "• Напоминание — «напомни в 10 утра купить продукты»\n"
+            "• Списки — «список покупок: молоко, хлеб, яйца»\n\n"
             "📌 Команды:\n"
             "/auth — подключить календарь\n"
             "/timezone — сменить часовой пояс\n"
@@ -248,10 +298,8 @@ async def _handle_delete_choice(update: Update, user_id, text: str, pending: dic
     """Обрабатывает выбор номера для удаления."""
     matches = pending.get("matches", [])
 
-    # Пробуем извлечь номер из текста: "1", "удали 1", "первый"
     number = _extract_number(text)
     if number is None:
-        # Проверяем отмену
         lower = text.lower().strip()
         if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
             _clear_pending(user_id)
@@ -260,7 +308,6 @@ async def _handle_delete_choice(update: Update, user_id, text: str, pending: dic
             await save_message(user_id, "user", text)
             await save_message(user_id, "assistant", r)
             return True
-        # Не число и не отмена — не наш ответ
         return False
 
     if number < 1 or number > len(matches):
@@ -270,7 +317,6 @@ async def _handle_delete_choice(update: Update, user_id, text: str, pending: dic
         await save_message(user_id, "assistant", r)
         return True
 
-    # Удаляем выбранное событие
     event = matches[number - 1]
     external_id = event.get("external_event_id")
 
@@ -313,10 +359,9 @@ async def _handle_create_list_confirm(update: Update, user_id, text: str, pendin
             await add_list_items(list_id, items, added_by=user_id)
 
         _clear_pending(user_id)
-        items_str = ", ".join(items) if items else ""
         r = f"✅ Создан список \"{list_name}\""
-        if items_str:
-            r += f" и добавлено: {items_str}"
+        if items:
+            r += f" и добавлено: {', '.join(items)}"
 
         await update.message.reply_text(r)
         await save_message(user_id, "user", text)
@@ -368,31 +413,6 @@ async def _handle_add_to_list_choice(update: Update, user_id, text: str, pending
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)
     return True
-    """Извлекает число из текста: '1', 'удали 2', 'третий'."""
-    import re
-
-    # Словесные числительные
-    words_to_num = {
-        "первый": 1, "первое": 1, "первая": 1, "первую": 1,
-        "второй": 2, "второе": 2, "вторая": 2, "вторую": 2,
-        "третий": 3, "третье": 3, "третья": 3, "третью": 3,
-        "четвёртый": 4, "четвертый": 4, "четвёртое": 4, "четвертое": 4,
-        "пятый": 5, "пятое": 5, "пятая": 5,
-    }
-
-    lower = text.lower().strip()
-
-    # Сначала проверяем словесные
-    for word, num in words_to_num.items():
-        if word in lower:
-            return num
-
-    # Потом ищем цифры
-    match = re.search(r"\d+", lower)
-    if match:
-        return int(match.group())
-
-    return None
 
 
 # ─── Создание события ─────────────────────────────────────
@@ -513,10 +533,6 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
 
-    # --- Определяем временной диапазон ---
-    # Если AI указал конкретную дату — ищем за этот день
-    # Если указал period — за этот период
-    # Иначе — за ближайшую неделю
     date_str = parsed.get("date")
     period = parsed.get("period")
 
@@ -538,13 +554,11 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
         time_max = time_min + timedelta(days=7)
 
-    # --- Ленивая sync перед поиском ---
     try:
         await sync_calendar(user_id)
     except Exception as e:
         logger.error(f"Sync failed before delete for user {user_id}: {e}")
 
-    # --- Ищем в БД ---
     matches = await find_event_by_title(user_id, title_query, time_min, time_max)
 
     if not matches:
@@ -569,7 +583,6 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
         await update.message.reply_text(r)
         return r
     else:
-        # Несколько совпадений — сохраняем pending action и просим выбрать
         tz = ZoneInfo(tz_name)
         lines = ["Нашла несколько совпадений. Какое удалить?\n"]
         for i, e in enumerate(matches, 1):
@@ -581,10 +594,7 @@ async def _handle_delete(update: Update, user_id, parsed: dict, user_now: dateti
             lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
         lines.append("\nНапиши номер или «отмена».")
 
-        # Сохраняем список для обработки следующего сообщения
-        _set_pending(user_id, "delete_choice", {
-            "matches": matches,
-        })
+        _set_pending(user_id, "delete_choice", {"matches": matches})
 
         r = "\n".join(lines)
         await update.message.reply_text(r)
@@ -638,7 +648,7 @@ async def _handle_remind(update: Update, user_id, parsed: dict, user_now: dateti
 
 async def _handle_create_list(update: Update, user_id, parsed: dict, user_now: datetime):
     """Создаёт новый список с элементами."""
-    name = parsed.get("list_name") or parsed.get("title") or "Список"
+    base_name = parsed.get("list_name") or parsed.get("title") or "Список"
     list_type = parsed.get("list_type") or "checklist"
     items = parsed.get("items") or []
     date_str = parsed.get("date")
@@ -657,19 +667,24 @@ async def _handle_create_list(update: Update, user_id, parsed: dict, user_now: d
             target_date = user_now.date()
 
         # Автоархивация: конец следующего дня
-        from datetime import date as date_type
         archive_date = target_date + timedelta(days=1)
         auto_archive_at = datetime(
             archive_date.year, archive_date.month, archive_date.day,
             tzinfo=user_now.tzinfo,
         )
 
+    # Дата в название чеклиста: "Покупки" → "Покупки 30.03"
+    if list_type == "checklist":
+        display_name = _make_checklist_name(base_name.capitalize(), target_date, user_now)
+    else:
+        display_name = base_name.capitalize()
+
     # Иконка по типу
     icon = "🛒" if list_type == "checklist" else "📋"
 
     list_id = await create_list(
         user_id=user_id,
-        name=name.capitalize(),
+        name=display_name,
         list_type=list_type,
         target_date=target_date,
         auto_archive_at=auto_archive_at,
@@ -679,9 +694,10 @@ async def _handle_create_list(update: Update, user_id, parsed: dict, user_now: d
     if items:
         await add_list_items(list_id, items, added_by=user_id)
 
+    # Формируем ответ
+    date_label = _format_date_label(target_date, user_now)
     item_text = f" ({len(items)} поз.)" if items else ""
-    type_label = "Список" if list_type == "checklist" else "Коллекция"
-    r = f"{icon} {type_label} \"{name.capitalize()}\" создан{item_text}"
+    r = f"{icon} \"{display_name}\"{date_label} создан{item_text}"
 
     if items and len(items) <= 10:
         r += "\n" + "\n".join(f"  ☐ {item}" for item in items)
@@ -724,7 +740,6 @@ async def _handle_add_to_list(update: Update, user_id, parsed: dict):
     if len(matches) == 1:
         target = matches[0]
     else:
-        # Несколько совпадений — предлагаем выбрать
         lines = ["Нашла несколько списков:\n"]
         for i, m in enumerate(matches, 1):
             lines.append(f"{i}. {m.get('icon', '📋')} {m['name']}")
@@ -750,7 +765,6 @@ async def _handle_show_list(update: Update, user_id, parsed: dict):
     list_name = parsed.get("list_name") or ""
 
     if not list_name:
-        # Показываем все активные списки
         return await _handle_show_lists(update, user_id)
 
     matches = await find_list_by_name(user_id, list_name)
@@ -778,7 +792,6 @@ async def _handle_show_list(update: Update, user_id, parsed: dict):
             mark = "•"
         lines.append(f"  {mark} {item['content']}")
 
-    # Статистика для чеклистов
     if target["list_type"] == "checklist":
         total = len(items)
         checked = sum(1 for i in items if i["is_checked"])
@@ -800,7 +813,6 @@ async def _handle_check_items(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
 
-    # Если list_name не указан — ищем активные чеклисты
     if list_name:
         matches = await find_list_by_name(user_id, list_name, list_type="checklist")
     else:
@@ -811,7 +823,6 @@ async def _handle_check_items(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
 
-    # Пробуем отметить в каждом активном чеклисте
     all_checked = []
     for lst in matches:
         checked = await check_list_items(lst["id"], items, checked_by=user_id)
@@ -822,7 +833,6 @@ async def _handle_check_items(update: Update, user_id, parsed: dict):
         names = ", ".join(c[1] for c in all_checked)
         r = f"✅ Готово: {names}"
 
-        # Проверяем: всё ли выполнено?
         if len(matches) == 1:
             remaining = await get_list_items(matches[0]["id"], include_checked=False)
             if not remaining:
