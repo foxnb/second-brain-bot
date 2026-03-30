@@ -22,7 +22,7 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 Верни ТОЛЬКО JSON (без markdown, без ```), строго по формату:
 
 {{
-  "intent": "create_event" | "show_events" | "delete_event" | "remind" | "create_list" | "add_to_list" | "show_list" | "check_items" | "remove_from_list" | "show_lists" | "change_timezone" | "connect_calendar" | "delete_account" | "help" | "chitchat" | "unknown",
+  "intent": "create_event" | "show_events" | "delete_event" | "remind" | "create_list" | "add_to_list" | "show_list" | "check_items" | "remove_from_list" | "delete_list" | "show_lists" | "change_timezone" | "connect_calendar" | "delete_account" | "help" | "chitchat" | "unknown",
   "title": "название события/напоминания" или null,
   "date": "YYYY-MM-DD" или null,
   "time": "HH:MM" или null,
@@ -43,7 +43,8 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 - add_to_list — добавить в СУЩЕСТВУЮЩИЙ список: "добавь яблоки в покупки", "добавь Интерстеллар в список фильмов"
 - show_list — показать содержимое списка: "что в списке покупок?", "что купить сегодня?", "покажи список фильмов"
 - check_items — отметить как выполненное: "взяла молоко", "молоко+", "купила хлеб и яблоки"
-- remove_from_list — убрать из списка: "удали молоко из покупок", "убери хлеб"
+- remove_from_list — убрать ЭЛЕМЕНТ из списка: "удали молоко из покупок", "убери хлеб из списка"
+- delete_list — удалить ВЕСЬ СПИСОК целиком: "удали список покупок", "удали список фильмов", "удали список покупки 30.03"
 - show_lists — показать все списки: "мои списки", "какие у меня списки?"
 - change_timezone — узнать или сменить часовой пояс: "поменяй часовой пояс", "какой у меня часовой пояс"
 - connect_calendar — подключить календарь: "подключить гугл", "connect calendar", "авторизация"
@@ -51,6 +52,11 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 - help — помощь: "что ты умеешь", "помощь", "help"
 - chitchat — болтовня: "привет", "как дела", "спасибо"
 - unknown — если вообще не понял о чём речь
+
+ВАЖНО — различай remove_from_list и delete_list:
+- "удали молоко из покупок" → remove_from_list (удалить ЭЛЕМЕНТ из списка), items=["молоко"]
+- "удали список покупок" → delete_list (удалить ВЕСЬ СПИСОК), list_name="покупок"
+- Ключевое отличие: если после "удали" идёт "список ..." → это delete_list. Если "удали X из Y" → remove_from_list.
 
 ПРАВИЛА ДЛЯ СПИСКОВ:
 - Если пользователь перечисляет элементы при создании → create_list с items
@@ -127,10 +133,9 @@ async def parse_message(
         timezone=tz_name,
     )
 
-    # Собираем сообщения: system + история + текущее
     messages = [{"role": "system", "content": system}]
     if history:
-        for msg in history[-8:]:  # Последние 8 сообщений из истории
+        for msg in history[-8:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": text})
 

@@ -170,7 +170,6 @@ async def get_recent_messages(user_id: UUID, limit: int = 10) -> list[dict]:
         """,
         user_id, limit,
     )
-    # Возвращаем в хронологическом порядке (от старых к новым)
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
@@ -219,7 +218,7 @@ async def save_calendar_connection(
                     """,
                     token_json, refresh_token, provider_email, existing["id"],
                 )
-                is_primary = False  # уже существует
+                is_primary = False
             else:
                 count = await conn.fetchval(
                     "SELECT COUNT(*) FROM calendar_connections WHERE user_id = $1",
@@ -375,7 +374,6 @@ async def upsert_event(
     """
     pool = await get_pool()
 
-    # Получаем default status_id если не указан
     if status_id is None:
         status_id = await pool.fetchval(
             """
@@ -387,7 +385,6 @@ async def upsert_event(
             """,
             user_id,
         )
-        # fallback: первый статус в системе
         if status_id is None:
             status_id = await pool.fetchval(
                 "SELECT id FROM statuses WHERE is_system = TRUE AND position = 1 LIMIT 1"
@@ -758,7 +755,6 @@ async def add_list_items(
     """Добавляет элементы в список. Возвращает список ID."""
     pool = await get_pool()
 
-    # Получаем текущий max position
     max_pos = await pool.fetchval(
         "SELECT COALESCE(MAX(position), 0) FROM list_items WHERE list_id = $1",
         list_id,
@@ -776,7 +772,6 @@ async def add_list_items(
         )
         ids.append(item_id)
 
-    # Обновляем updated_at списка
     await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
 
     logger.info(f"Added {len(ids)} items to list {list_id}")
@@ -875,6 +870,22 @@ async def remove_list_items(
         await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
 
     return removed
+
+
+async def archive_list(user_id: UUID, list_id: int) -> bool:
+    """Архивирует (удаляет) список по ID. Только свой."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE lists SET status = 'archived', updated_at = now()
+        WHERE id = $1 AND user_id = $2 AND status = 'active'
+        """,
+        list_id, user_id,
+    )
+    success = "UPDATE 1" in result
+    if success:
+        logger.info(f"Archived list {list_id} for user {user_id}")
+    return success
 
 
 async def archive_expired_lists() -> int:
