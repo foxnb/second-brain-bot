@@ -1,6 +1,6 @@
 """
 Revory - Database Service (Schema v9)
-UUID users + auth_methods + calendar_connections + events mirror
+UUID users + auth_methods + calendar_connections + events mirror + color mappings
 Supabase (PostgreSQL) через asyncpg
 """
 
@@ -367,6 +367,7 @@ async def upsert_event(
     timezone: str,
     description: str = "",
     status_id: Optional[int] = None,
+    color_id: Optional[int] = None,
 ) -> int:
     """
     Создаёт или обновляет событие по external_event_id.
@@ -394,8 +395,8 @@ async def upsert_event(
         """
         INSERT INTO events
             (user_id, calendar_connection_id, external_event_id,
-             title, description, start_time, end_time, timezone, status_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             title, description, start_time, end_time, timezone, status_id, color_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (calendar_connection_id, external_event_id)
             WHERE external_event_id IS NOT NULL
         DO UPDATE SET
@@ -404,13 +405,14 @@ async def upsert_event(
             start_time = EXCLUDED.start_time,
             end_time = EXCLUDED.end_time,
             timezone = EXCLUDED.timezone,
+            color_id = EXCLUDED.color_id,
             is_deleted = FALSE,
             deleted_at = NULL,
             updated_at = now()
         RETURNING id
         """,
         user_id, calendar_connection_id, external_event_id,
-        title, description, start_time, end_time, timezone, status_id,
+        title, description, start_time, end_time, timezone, status_id, color_id,
     )
     return row["id"]
 
@@ -451,12 +453,12 @@ async def get_events_from_db(
     time_max: datetime,
     limit: int = 50,
 ) -> list[dict]:
-    """Читает события из БД за период."""
+    """Читает события из БД за период (с color_id)."""
     pool = await get_pool()
     rows = await pool.fetch(
         """
         SELECT id, external_event_id, title, description,
-               start_time, end_time, timezone
+               start_time, end_time, timezone, color_id
         FROM events
         WHERE user_id = $1
           AND start_time >= $2
@@ -482,7 +484,7 @@ async def find_event_by_title(
     rows = await pool.fetch(
         """
         SELECT id, external_event_id, calendar_connection_id,
-               title, start_time, end_time
+               title, start_time, end_time, color_id
         FROM events
         WHERE user_id = $1
           AND LOWER(title) LIKE '%' || LOWER($2) || '%'
@@ -506,6 +508,20 @@ async def get_connection_id_for_event(event_id: int) -> Optional[int]:
     )
 
 
+async def get_distinct_colors_for_user(user_id: UUID) -> list[int]:
+    """Уникальные colorId из событий пользователя (без NULL)."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT color_id FROM events
+        WHERE user_id = $1 AND color_id IS NOT NULL AND is_deleted = FALSE
+        ORDER BY color_id
+        """,
+        user_id,
+    )
+    return [r["color_id"] for r in rows]
+
+
 async def cleanup_deleted_events(days: int = 30) -> int:
     """Физически удаляет события, удалённые более N дней назад."""
     pool = await get_pool()
@@ -521,6 +537,72 @@ async def cleanup_deleted_events(days: int = 30) -> int:
     if count > 0:
         logger.info(f"Cleaned up {count} deleted events older than {days} days")
     return count
+
+
+# ─── Color Mappings ───────────────────────────────────────
+
+async def get_color_mappings(user_id: UUID) -> list[dict]:
+    """Все маппинги цветов пользователя."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, google_color_id, label, emoji, category_id
+        FROM color_mappings
+        WHERE user_id = $1
+        ORDER BY google_color_id
+        """,
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def save_color_mapping(
+    user_id: UUID,
+    google_color_id: int,
+    label: str,
+    emoji: Optional[str] = None,
+) -> int:
+    """Сохраняет или обновляет маппинг цвета. Возвращает id."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO color_mappings (user_id, google_color_id, label, emoji)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id, google_color_id)
+        DO UPDATE SET label = EXCLUDED.label, emoji = COALESCE(EXCLUDED.emoji, color_mappings.emoji)
+        RETURNING id
+        """,
+        user_id, google_color_id, label, emoji,
+    )
+    return row["id"]
+
+
+async def delete_color_mappings(user_id: UUID):
+    """Удаляет все маппинги цветов пользователя (для пересоздания)."""
+    pool = await get_pool()
+    await pool.execute(
+        "DELETE FROM color_mappings WHERE user_id = $1",
+        user_id,
+    )
+
+
+async def get_colors_asked(user_id: UUID) -> bool:
+    """Спрашивали ли пользователя про цвета."""
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT colors_asked FROM users WHERE id = $1",
+        user_id,
+    )
+    return val or False
+
+
+async def set_colors_asked(user_id: UUID, asked: bool):
+    """Устанавливает флаг colors_asked."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET colors_asked = $1 WHERE id = $2",
+        asked, user_id,
+    )
 
 
 # ─── Reminders ─────────────────────────────────────────────

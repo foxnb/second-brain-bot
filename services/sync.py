@@ -215,6 +215,7 @@ async def _save_google_event(
 ) -> bool:
     """
     Парсит событие Google Calendar и сохраняет в БД через upsert.
+    Теперь также сохраняет colorId.
     Возвращает True если успешно.
     """
     event_id = event.get("id")
@@ -242,6 +243,15 @@ async def _save_google_event(
     # Timezone из события или дефолт
     tz_name = start_data.get("timeZone") or event.get("timeZone") or "UTC"
 
+    # Цвет из Google Calendar (colorId: "1"-"11" или отсутствует)
+    color_id = None
+    raw_color = event.get("colorId")
+    if raw_color:
+        try:
+            color_id = int(raw_color)
+        except (ValueError, TypeError):
+            pass
+
     try:
         start_time = _parse_google_datetime(start_str)
         end_time = _parse_google_datetime(end_str) if end_str else start_time
@@ -259,6 +269,7 @@ async def _save_google_event(
             end_time=end_time,
             timezone=tz_name,
             description=description,
+            color_id=color_id,
         )
         return True
     except Exception as e:

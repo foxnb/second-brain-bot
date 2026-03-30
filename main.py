@@ -25,6 +25,7 @@ from starlette.routing import Route
 import uvicorn
 
 from handlers.router import handle_text
+from handlers.events import handle_setup_colors
 from services.calendar import start_auth, finish_auth_callback, revoke_google_token
 from services.database import (
     ensure_user,
@@ -158,7 +159,8 @@ async def _send_welcome(update_or_query):
         "• Создавать встречи — «встреча завтра в 15:00 с клиентом»\n"
         "• Показывать расписание — «что у меня сегодня?»\n"
         "• Удалять события — «удали встречу с клиентом»\n"
-        "• Ставить напоминания — «напомни в 10 утра купить продукты»\n\n"
+        "• Ставить напоминания — «напомни в 10 утра купить продукты»\n"
+        "• Настраивать цвета событий — /colors\n\n"
         "Подключи календарь: /auth\n"
         "Сменить часовой пояс: /timezone\n\n"
         "Просто пиши как думаешь!"
@@ -241,6 +243,16 @@ async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"1️⃣ Перейди по ссылке и разреши доступ:\n{auth_url}\n\n"
         "После разрешения доступа Google автоматически завершит подключение — ничего копировать не нужно!"
     )
+
+
+async def cmd_colors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /colors — настройка цветов событий."""
+    telegram_id = update.message.from_user.id
+    user_id = await _get_user_id(telegram_id, context)
+    if not user_id:
+        await update.message.reply_text("❌ Ошибка. Нажми /start")
+        return
+    await handle_setup_colors(update, user_id)
 
 
 async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -400,6 +412,7 @@ def main():
     _telegram_app.add_handler(CommandHandler("start", cmd_start))
     _telegram_app.add_handler(CommandHandler("auth", cmd_auth))
     _telegram_app.add_handler(CommandHandler("timezone", cmd_timezone))
+    _telegram_app.add_handler(CommandHandler("colors", cmd_colors))
     _telegram_app.add_handler(CommandHandler("disconnect", cmd_disconnect))
     _telegram_app.add_handler(CommandHandler("logout", cmd_logout))
     _telegram_app.add_handler(CommandHandler("deletedata", cmd_deletedata))

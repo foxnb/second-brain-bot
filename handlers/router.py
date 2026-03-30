@@ -13,7 +13,7 @@ from services.database import load_timezone, save_message, get_recent_messages
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors
 from handlers.reminders import handle_remind
 from handlers.lists import (
     handle_create_list,
@@ -105,6 +105,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif intent == "show_lists":
         reply_text = await handle_show_lists(update, user_id)
 
+    elif intent == "setup_colors":
+        reply_text = await handle_setup_colors(update, user_id)
+
     elif intent == "change_timezone":
         tz_current = await load_timezone(user_id)
         reply_text = (
@@ -134,10 +137,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Показать расписание — «что у меня сегодня?»\n"
             "• Удалить событие — «удали встречу с клиентом»\n"
             "• Напоминание — «напомни в 10 утра купить продукты»\n"
-            "• Списки — «список покупок: молоко, хлеб, яйца»\n\n"
+            "• Списки — «список покупок: молоко, хлеб, яйца»\n"
+            "• Цвета — «настрой цвета» или /colors\n\n"
             "📌 Команды:\n"
             "/auth — подключить календарь\n"
             "/timezone — сменить часовой пояс\n"
+            "/colors — настроить цвета событий\n"
             "/disconnect — отключить календарь\n"
             "/logout — удалить аккаунт и данные\n\n"
             "Просто пиши как думаешь!"
