@@ -92,10 +92,18 @@ async def handle_create(update: Update, user_id, parsed: dict):
             end_time = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
         except ValueError:
             pass
-    result = await create_event(user_id, title, start_time, end_time)
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, (int, float)):
+        color_id = int(color_id)
+    elif color_id is not None:
+        color_id = None
+
+    result = await create_event(user_id, title, start_time, end_time, color_id=color_id)
     if result:
         start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
-        r = f"✅ Создано: **{result['title']}**\n📅 {start_fmt}\n🔗 {result['link']}"
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "") if color_id else ""
+        color_suffix = f"  {color_emoji}" if color_emoji else ""
+        r = f"✅ Создано: **{result['title']}**{color_suffix}\n📅 {start_fmt}\n🔗 {result['link']}"
         await update.message.reply_text(r, parse_mode="Markdown")
         return r
     else:
