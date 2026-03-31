@@ -191,6 +191,7 @@ async def create_event(
     start_time: datetime,
     end_time: Optional[datetime] = None,
     description: str = "",
+    color_id: Optional[int] = None,
 ) -> Optional[dict]:
     service = await _get_service(user_id)
     if not service:
@@ -207,6 +208,8 @@ async def create_event(
         "start": {"dateTime": _to_rfc3339(start_time, tz), "timeZone": tz},
         "end": {"dateTime": _to_rfc3339(end_time, tz), "timeZone": tz},
     }
+    if color_id is not None:
+        event_body["colorId"] = str(color_id)
 
     try:
         event = service.events().insert(calendarId="primary", body=event_body).execute()
@@ -229,6 +232,7 @@ async def create_event(
                 end_time=end_aware,
                 timezone=tz,
                 description=description,
+                color_id=color_id,
             )
             logger.info(f"Saved event mirror in DB for {google_event_id}")
 
