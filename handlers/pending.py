@@ -4,6 +4,7 @@ Revory — Pending Actions (мультишаговые диалоги).
 выбор из списка, подтверждения, настройка цветов.
 """
 
+import re
 import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -78,7 +79,7 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
     return False
 
 
-# ─── Обработчики ──────────────────────────────────────────
+# ─── Обработчики (списки / удаление) ─────────────────────
 
 async def _handle_delete_choice(update: Update, user_id, text: str, pending: dict) -> bool:
     """Обрабатывает выбор номера для удаления события."""
@@ -207,73 +208,110 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     return True
 
 
-# ─── Цвета ────────────────────────────────────────────────
+# ─── Цвета: парсинг ──────────────────────────────────────
 
-# Ключевые слова → google_color_id для парсинга ответа пользователя
-_COLOR_KEYWORDS = {
-    "лаванд": 1, "сирен": 1, "фиолет": 1,
-    "шалфей": 2, "салат": 2,
-    "виноград": 3,
-    "фламинго": 4, "роз": 4, "розов": 4,
-    "банан": 5, "жёлт": 5, "желт": 5,
-    "мандарин": 6, "оранж": 6,
-    "павлин": 7, "син": 7, "голуб": 7,
-    "графит": 8, "сер": 8, "чёрн": 8, "черн": 8,
-    "черник": 9, "тёмно-син": 9, "темно-син": 9,
-    "базилик": 10, "зелён": 10, "зелен": 10,
-    "томат": 11, "красн": 11, "алый": 11,
-}
+# Ключевые слова → google_color_id
+# Порядок: более длинные/специфичные первыми, короткие последними
+_COLOR_PATTERNS: list[tuple[str, int]] = [
+    ("тёмно-син", 9), ("темно-син", 9),
+    ("лаванд", 1), ("сирен", 1), ("фиолет", 1),
+    ("шалфей", 2), ("салатов", 2),
+    ("виноград", 3),
+    ("фламинго", 4), ("розов", 4),
+    ("банан", 5), ("жёлт", 5), ("желт", 5),
+    ("мандарин", 6), ("оранж", 6),
+    ("павлин", 7), ("голуб", 7),
+    ("графит", 8), ("чёрн", 8), ("черн", 8),
+    ("черник", 9),
+    ("базилик", 10),
+    ("томат", 11), ("алый", 11), ("алая", 11),
+    # Короткие — последними
+    ("син", 7),
+    ("зелён", 10), ("зелен", 10),
+    ("красн", 11),
+    ("сер", 8),
+    ("роз", 4),
+]
+
+
+def _find_color_in_text(text: str) -> tuple[int | None, int, int]:
+    """
+    Находит цветовое слово в тексте.
+    Возвращает (color_id, start_index, end_index).
+    start/end — позиции полного слова, содержащего ключ.
+    """
+    lower = text.lower()
+    for keyword, cid in _COLOR_PATTERNS:
+        idx = lower.find(keyword)
+        if idx != -1:
+            # Расширяем до полного слова
+            start = idx
+            while start > 0 and lower[start - 1].isalpha():
+                start -= 1
+            end = idx + len(keyword)
+            while end < len(lower) and lower[end].isalpha():
+                end += 1
+            return cid, start, end
+    return None, -1, -1
 
 
 def _parse_color_assignments(text: str, available_colors: list[int]) -> list[tuple[int, str]]:
     """
-    Парсит текст вида "синий — работа, зелёный — личное".
-    Возвращает [(google_color_id, label), ...].
+    Гибкий парсер цветовых назначений. Понимает:
+    - "синий — работа, зелёный — личное"
+    - "красный - сделать, синий сделано"
+    - "Красный -сделать, синий сделано"
+    - "синий=работа, красный=срочное"
+    - "работа красным, личное зелёным"
+    - "красный сделать, синий сделано"
+    
+    Логика: разбиваем на фрагменты, в каждом ищем цветовое слово,
+    всё остальное (после очистки разделителей) = label.
     """
     results = []
-    # Разбиваем по запятой, точке с запятой, переводу строки
-    parts = []
-    for sep in [",", ";", "\n"]:
-        if sep in text:
-            parts = [p.strip() for p in text.split(sep) if p.strip()]
-            break
-    if not parts:
-        parts = [text.strip()]
+
+    # Разбиваем на фрагменты по запятой, ;, переводу строки
+    parts = re.split(r'[,;\n]+', text)
 
     for part in parts:
-        # Разбиваем по " — ", " - ", " = ", " это "
-        pair = None
-        for sep in [" — ", " - ", " = ", " это ", ": "]:
-            if sep in part:
-                left, right = part.split(sep, 1)
-                pair = (left.strip().lower(), right.strip())
-                break
-        if not pair:
+        part = part.strip()
+        if not part:
             continue
 
-        color_word, label = pair
+        # Ищем цветовое слово
+        color_id, start, end = _find_color_in_text(part)
+        if color_id is None:
+            continue
 
-        # Определяем color_id по ключевым словам
-        matched_id = None
-        for keyword, cid in _COLOR_KEYWORDS.items():
-            if keyword in color_word:
-                if cid in available_colors:
-                    matched_id = cid
-                    break
-        if matched_id is None:
-            # Попробуем обратный порядок (label — цвет)
-            for keyword, cid in _COLOR_KEYWORDS.items():
-                if keyword in label.lower():
-                    if cid in available_colors:
-                        matched_id = cid
-                        label = pair[0]  # обратный порядок
-                        break
+        if available_colors and color_id not in available_colors:
+            continue
 
-        if matched_id and label:
-            results.append((matched_id, label.strip()))
+        # Label — всё кроме цветового слова
+        before = part[:start].strip()
+        after = part[end:].strip()
+
+        # Убираем разделители по краям: — - = :
+        before = before.strip("-—=: ")
+        after = after.strip("-—=: ")
+
+        # Label — непустая часть (before или after)
+        if after and before:
+            # Оба непустые — label = более длинный (вероятнее осмысленный)
+            label = after if len(after) >= len(before) else before
+        elif after:
+            label = after
+        elif before:
+            label = before
+        else:
+            continue
+
+        if label:
+            results.append((color_id, label))
 
     return results
 
+
+# ─── Цвета: обработчики pending ──────────────────────────
 
 async def _handle_color_setup(update: Update, user_id, text: str, pending: dict) -> bool:
     """Обрабатывает первичную настройку цветов (после автовопроса)."""
@@ -291,8 +329,9 @@ async def _handle_color_setup(update: Update, user_id, text: str, pending: dict)
 
     if not assignments:
         r = (
-            "🤔 Не поняла. Напиши в формате:\n"
-            "«синий — работа, зелёный — личное»\n\n"
+            "🤔 Не поняла. Напиши, например:\n"
+            "«синий — работа, зелёный — личное»\n"
+            "или «красный сделать, синий сделано»\n\n"
             "Или «пропустить»."
         )
         await update.message.reply_text(r)
@@ -300,7 +339,6 @@ async def _handle_color_setup(update: Update, user_id, text: str, pending: dict)
         await save_message(user_id, "assistant", r)
         return True
 
-    # Сохраняем маппинги
     from handlers.events import GOOGLE_COLOR_EMOJI, GOOGLE_COLOR_NAME_RU
 
     saved_lines = []
@@ -342,7 +380,6 @@ async def _handle_color_edit(update: Update, user_id, text: str, pending: dict) 
         return True
 
     available_colors = pending.get("colors", [])
-    # Если нет информации о доступных цветах, берём все
     if not available_colors:
         from services.database import get_distinct_colors_for_user
         available_colors = await get_distinct_colors_for_user(user_id)
@@ -353,8 +390,9 @@ async def _handle_color_edit(update: Update, user_id, text: str, pending: dict) 
 
     if not assignments:
         r = (
-            "🤔 Не поняла. Напиши в формате:\n"
-            "«синий — работа, зелёный — личное»\n\n"
+            "🤔 Не поняла. Напиши, например:\n"
+            "«синий — работа, зелёный — личное»\n"
+            "или «красный сделать, синий сделано»\n\n"
             "Или «сбросить» / «отмена»."
         )
         await update.message.reply_text(r)
