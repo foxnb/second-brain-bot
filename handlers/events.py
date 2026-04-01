@@ -15,6 +15,7 @@ from services.sync import sync_calendar
 from services.database import (
     get_events_from_db,
     find_event_by_title,
+    find_duplicate_event,
     soft_delete_event,
     get_color_mappings,
     get_colors_asked,
@@ -98,6 +99,16 @@ async def handle_create(update: Update, user_id, parsed: dict):
         color_id = int(color_id)
     elif color_id is not None:
         color_id = None
+
+    # Проверка дубликата: то же название + то же время ±5 минут
+    duplicate = await find_duplicate_event(user_id, title, start_time)
+    if duplicate:
+        start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
+        r = f"⚠️ Событие «{title}» на {start_fmt} уже существует. Создать ещё одно?"
+        await update.message.reply_text(r)
+        from handlers.pending import set_pending
+        set_pending(user_id, "create_duplicate_confirm", {"parsed": parsed})
+        return r
 
     result = await create_event(user_id, title, start_time, end_time, color_id=color_id)
     if result:
@@ -306,20 +317,32 @@ async def handle_move_by_color(
         await update.message.reply_text(r)
         return r
 
+    # Если пользователь указал конкретный индекс (первое/второе/одно)
+    event_index = parsed.get("event_index")
+    if isinstance(event_index, float):
+        event_index = int(event_index)
+    if event_index is not None and 1 <= event_index <= len(events):
+        events = [events[event_index - 1]]
+
     color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
     tz = ZoneInfo(tz_name)
     direction = "вперёд" if offset_days > 0 else "назад"
     abs_days = abs(offset_days)
     target_label = target_date.strftime("%d.%m.%Y")
 
+    count_word = f"{len(events)}" if len(events) > 1 else "1"
     lines = [
-        f"📅 Найдено {len(events)} {color_emoji} событий.\n"
+        f"📅 Найдено {count_word} {color_emoji} событий.\n"
         f"Перенести на {target_label} ({abs_days} дн. {direction})?\n"
     ]
-    for e in events:
+    for i, e in enumerate(events, 1):
         start = e["start_time"].astimezone(tz)
-        lines.append(f"• {start.strftime('%d.%m %H:%M')} — {e['title']}")
-    lines.append("\nНапиши «да» или «отмена».")
+        lines.append(f"{i}. {start.strftime('%d.%m %H:%M')} — {e['title']}")
+
+    if len(events) > 1:
+        lines.append("\nНапиши «да» (все), номер (одно) или «отмена».")
+    else:
+        lines.append("\nНапиши «да» или «отмена».")
 
     set_pending(user_id, "move_by_color_confirm", {
         "events": events,

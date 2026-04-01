@@ -156,6 +156,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(reply_text)
 
+    elif intent == "defer":
+        reply_text = parsed.get("reply", "Хорошо! Напиши мне когда будешь готова — всё сделаем 😊")
+        await update.message.reply_text(reply_text)
+
     elif intent == "chitchat":
         reply_text = parsed.get("reply", "Привет! Чем могу помочь?")
         await update.message.reply_text(reply_text)

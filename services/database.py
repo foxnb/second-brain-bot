@@ -499,6 +499,36 @@ async def find_event_by_title(
     return [dict(r) for r in rows]
 
 
+async def find_duplicate_event(
+    user_id: UUID,
+    title: str,
+    start_time: datetime,
+    window_minutes: int = 5,
+) -> Optional[dict]:
+    """
+    Ищет событие с тем же названием (точное, case-insensitive) в окне ±window_minutes минут.
+    Используется перед созданием для дедупликации.
+    """
+    pool = await get_pool()
+    from datetime import timedelta
+    t_min = start_time - timedelta(minutes=window_minutes)
+    t_max = start_time + timedelta(minutes=window_minutes)
+    row = await pool.fetchrow(
+        """
+        SELECT id, external_event_id, title, start_time
+        FROM events
+        WHERE user_id = $1
+          AND LOWER(title) = LOWER($2)
+          AND start_time >= $3
+          AND start_time <= $4
+          AND is_deleted = FALSE
+        LIMIT 1
+        """,
+        user_id, title, t_min, t_max,
+    )
+    return dict(row) if row else None
+
+
 async def get_connection_id_for_event(event_id: int) -> Optional[int]:
     """Получает calendar_connection_id по event id."""
     pool = await get_pool()

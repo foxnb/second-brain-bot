@@ -80,6 +80,8 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_bulk_delete_confirm(update, user_id, text, pending)
     if action == "move_by_color_confirm":
         return await _handle_move_by_color_confirm(update, user_id, text, pending)
+    if action == "create_duplicate_confirm":
+        return await _handle_create_duplicate_confirm(update, user_id, text, pending)
     return False
 
 
@@ -212,6 +214,70 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     return True
 
 
+# ─── Дедупликация создания событий ──────────────────────
+
+async def _handle_create_duplicate_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Подтверждение создания дублирующего события."""
+    lower = text.lower().strip()
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower not in ("да", "yes", "ага", "давай", "создай", "ок"):
+        return False
+
+    parsed = pending.get("parsed", {})
+    clear_pending(user_id)
+
+    # Повторно вызываем create через events handler, минуя проверку дубликата
+    from services.calendar import create_event
+    from handlers.events import GOOGLE_COLOR_EMOJI
+    from datetime import datetime as _dt
+
+    title = parsed.get("title")
+    date_str = parsed.get("date")
+    time_str = parsed.get("time")
+    end_time_str = parsed.get("end_time")
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, (int, float)):
+        color_id = int(color_id)
+    elif color_id is not None:
+        color_id = None
+
+    try:
+        start_time = _dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        end_time = None
+        if end_time_str:
+            try:
+                end_time = _dt.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+    except Exception:
+        r = "❌ Не смог разобрать дату/время."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    result = await create_event(user_id, title, start_time, end_time, color_id=color_id)
+    if result:
+        start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "") if color_id else ""
+        color_suffix = f"  {color_emoji}" if color_emoji else ""
+        r = f"✅ Создано: **{result['title']}**{color_suffix}\n📅 {start_fmt}\n🔗 {result['link']}"
+        await update.message.reply_text(r, parse_mode="Markdown")
+    else:
+        r = "❌ Не удалось создать событие. Попробуй позже."
+        await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
 # ─── Bulk delete / Move by color ─────────────────────────
 
 async def _handle_bulk_delete_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
@@ -257,6 +323,7 @@ async def _handle_bulk_delete_confirm(update: Update, user_id, text: str, pendin
 async def _handle_move_by_color_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
     """Подтверждение переноса событий по цвету."""
     lower = text.lower().strip()
+
     if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
         clear_pending(user_id)
         r = "👌 Отменено."
@@ -265,17 +332,33 @@ async def _handle_move_by_color_confirm(update: Update, user_id, text: str, pend
         await save_message(user_id, "assistant", r)
         return True
 
-    if lower not in ("да", "yes", "ага", "давай", "перенеси", "ок"):
-        return False
-
     events = pending.get("events", [])
     offset_days = pending.get("offset_days", 0)
     target_label = pending.get("target_label", "")
 
+    # Определяем какие события переносить
+    events_to_move = None
+
+    if lower in ("да", "yes", "ага", "давай", "перенеси", "ок", "все", "всё"):
+        events_to_move = events
+    else:
+        # Проверяем "только одно" / "первое" / "первый" / "одно"
+        _first_words = ("первое", "первый", "первую", "одно", "только одно", "одно из них", "одну")
+        if any(w in lower for w in _first_words):
+            events_to_move = events[:1]
+        else:
+            # Проверяем числовой выбор
+            number = extract_number(text)
+            if number is not None and 1 <= number <= len(events):
+                events_to_move = [events[number - 1]]
+
+    if events_to_move is None:
+        return False
+
     moved = 0
     failed = 0
 
-    for event in events:
+    for event in events_to_move:
         external_id = event.get("external_event_id")
         if not external_id:
             failed += 1
