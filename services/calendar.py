@@ -27,6 +27,7 @@ from services.database import (
     load_timezone,
     upsert_event,
     soft_delete_event_by_external_id,
+    update_event_times,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,44 @@ async def delete_event(user_id: UUID, event_id: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Delete event error: {e}")
+        return False
+
+
+async def move_event(
+    user_id: UUID,
+    external_event_id: str,
+    new_start: datetime,
+    new_end: datetime,
+) -> bool:
+    """
+    Переносит событие на новое время: patch в Google Calendar + обновление в БД.
+    new_start / new_end должны быть timezone-aware datetime.
+    """
+    service = await _get_service(user_id)
+    if not service:
+        return False
+
+    tz = await _get_user_tz(user_id)
+
+    try:
+        patch_body = {
+            "start": {"dateTime": new_start.isoformat(), "timeZone": tz},
+            "end": {"dateTime": new_end.isoformat(), "timeZone": tz},
+        }
+        service.events().patch(
+            calendarId="primary",
+            eventId=external_event_id,
+            body=patch_body,
+        ).execute()
+        logger.info(f"Moved event {external_event_id} for user {user_id}")
+
+        conn_data = await load_calendar_connection(user_id, provider="google")
+        if conn_data:
+            await update_event_times(external_event_id, conn_data["id"], new_start, new_end)
+
+        return True
+    except Exception as e:
+        logger.error(f"Move event error for {external_event_id}: {e}")
         return False
 
 

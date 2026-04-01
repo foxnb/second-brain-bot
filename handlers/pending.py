@@ -20,7 +20,7 @@ from services.database import (
     delete_color_mappings,
     get_color_mappings,
 )
-from services.calendar import delete_event
+from services.calendar import delete_event, move_event
 from handlers.utils import extract_number
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,10 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_color_setup(update, user_id, text, pending)
     if action == "color_edit":
         return await _handle_color_edit(update, user_id, text, pending)
+    if action == "bulk_delete_confirm":
+        return await _handle_bulk_delete_confirm(update, user_id, text, pending)
+    if action == "move_by_color_confirm":
+        return await _handle_move_by_color_confirm(update, user_id, text, pending)
     return False
 
 
@@ -202,6 +206,92 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     success = await archive_list(user_id, target["id"])
     clear_pending(user_id)
     r = f"🗑️ Список \"{target['name']}\" удалён." if success else "❌ Не удалось удалить."
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Bulk delete / Move by color ─────────────────────────
+
+async def _handle_bulk_delete_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Подтверждение массового удаления событий."""
+    lower = text.lower().strip()
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower not in ("да", "yes", "ага", "давай", "удали", "ок"):
+        return False
+
+    events = pending.get("events", [])
+    deleted = 0
+    failed = 0
+
+    for event in events:
+        external_id = event.get("external_event_id")
+        if external_id:
+            success = await delete_event(user_id, external_id)
+        else:
+            await soft_delete_event(event["id"])
+            success = True
+        if success:
+            deleted += 1
+        else:
+            failed += 1
+
+    clear_pending(user_id)
+    r = f"🗑️ Удалено: {deleted} событий."
+    if failed:
+        r += f" Не удалось: {failed}."
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+async def _handle_move_by_color_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Подтверждение переноса событий по цвету."""
+    lower = text.lower().strip()
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower not in ("да", "yes", "ага", "давай", "перенеси", "ок"):
+        return False
+
+    events = pending.get("events", [])
+    offset_days = pending.get("offset_days", 0)
+    target_label = pending.get("target_label", "")
+
+    moved = 0
+    failed = 0
+
+    for event in events:
+        external_id = event.get("external_event_id")
+        if not external_id:
+            failed += 1
+            continue
+        new_start = event["start_time"] + timedelta(days=offset_days)
+        new_end = event["end_time"] + timedelta(days=offset_days)
+        success = await move_event(user_id, external_id, new_start, new_end)
+        if success:
+            moved += 1
+        else:
+            failed += 1
+
+    clear_pending(user_id)
+    r = f"✅ Перенесено: {moved} событий на {target_label}."
+    if failed:
+        r += f" Не удалось перенести: {failed}."
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)

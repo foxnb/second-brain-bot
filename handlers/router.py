@@ -13,7 +13,8 @@ from services.database import load_timezone, save_message, get_recent_messages
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color
+from handlers.delete import handle_bulk_delete
 from handlers.reminders import handle_remind
 from handlers.lists import (
     handle_create_list,
@@ -60,7 +61,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_message(user_id, "user", text)
 
     # --- Проверка календаря для calendar-интентов ---
-    CALENDAR_INTENTS = {"create_event", "show_events", "delete_event"}
+    CALENDAR_INTENTS = {"create_event", "show_events", "delete_event", "bulk_delete_events", "move_by_color"}
     if intent in CALENDAR_INTENTS:
         creds = await get_credentials(user_id)
         if not creds:
@@ -80,6 +81,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "delete_event":
         reply_text = await handle_delete(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "bulk_delete_events":
+        reply_text = await handle_bulk_delete(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "move_by_color":
+        reply_text = await handle_move_by_color(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "remind":
         reply_text = await handle_remind(update, user_id, parsed, user_now, tz_name)

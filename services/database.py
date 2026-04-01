@@ -522,6 +522,69 @@ async def get_distinct_colors_for_user(user_id: UUID) -> list[int]:
     return [r["color_id"] for r in rows]
 
 
+async def get_events_by_color(
+    user_id: UUID,
+    color_id: Optional[int],
+    time_min: datetime,
+    time_max: datetime,
+    limit: int = 100,
+) -> list[dict]:
+    """События по цвету и периоду. Если color_id=None — все события за период."""
+    pool = await get_pool()
+    if color_id is not None:
+        rows = await pool.fetch(
+            """
+            SELECT id, external_event_id, calendar_connection_id,
+                   title, start_time, end_time, timezone, color_id
+            FROM events
+            WHERE user_id = $1
+              AND color_id = $2
+              AND start_time >= $3
+              AND start_time < $4
+              AND is_deleted = FALSE
+            ORDER BY start_time
+            LIMIT $5
+            """,
+            user_id, color_id, time_min, time_max, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, external_event_id, calendar_connection_id,
+                   title, start_time, end_time, timezone, color_id
+            FROM events
+            WHERE user_id = $1
+              AND start_time >= $2
+              AND start_time < $3
+              AND is_deleted = FALSE
+            ORDER BY start_time
+            LIMIT $4
+            """,
+            user_id, time_min, time_max, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_event_times(
+    external_event_id: str,
+    connection_id: int,
+    new_start: datetime,
+    new_end: datetime,
+) -> bool:
+    """Обновляет start_time и end_time события по external_event_id."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE events
+        SET start_time = $1, end_time = $2, updated_at = now()
+        WHERE external_event_id = $3 AND calendar_connection_id = $4
+          AND is_deleted = FALSE
+        """,
+        new_start, new_end, external_event_id, connection_id,
+    )
+    return "UPDATE 1" in result
+
+
 async def cleanup_deleted_events(days: int = 30) -> int:
     """Физически удаляет события, удалённые более N дней назад."""
     pool = await get_pool()

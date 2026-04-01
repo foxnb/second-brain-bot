@@ -20,6 +20,7 @@ from services.database import (
     get_colors_asked,
     set_colors_asked,
     get_distinct_colors_for_user,
+    get_events_by_color,
 )
 from handlers.pending import set_pending
 
@@ -240,6 +241,92 @@ async def handle_setup_colors(update: Update, user_id):
         r = "🎨 В твоих событиях пока нет цветов. Когда появятся — я спрошу что они означают."
 
     set_pending(user_id, "color_edit", {"colors": user_colors or []})
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_move_by_color(
+    update: Update,
+    user_id,
+    parsed: dict,
+    user_now: datetime,
+    tz_name: str,
+):
+    """
+    Переносит события определённого цвета на другую дату.
+    Смещение = target_date - today; применяется к каждому событию.
+    """
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, float):
+        color_id = int(color_id)
+    if not color_id:
+        r = "🎨 Укажи цвет событий для переноса. Например: «перенеси синие на следующую неделю»"
+        await update.message.reply_text(r)
+        return r
+
+    date_str = parsed.get("date")
+    period = parsed.get("period")
+
+    target_date = None
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+    if not target_date:
+        if period == "tomorrow":
+            target_date = (user_now + timedelta(days=1)).date()
+        else:
+            r = "📅 Укажи дату для переноса. Например: «перенеси синие на следующую неделю» или «на 10 апреля»"
+            await update.message.reply_text(r)
+            return r
+
+    offset_days = (target_date - user_now.date()).days
+    if offset_days == 0:
+        r = "📅 Это уже сегодня! Укажи другую дату."
+        await update.message.reply_text(r)
+        return r
+
+    # Ищем события с этим цветом в ближайшие 90 дней
+    time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    time_max = time_min + timedelta(days=90)
+
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before move_by_color: {e}")
+
+    events = await get_events_by_color(user_id, color_id, time_min, time_max)
+
+    if not events:
+        color_name = GOOGLE_COLOR_NAME_RU.get(color_id, f"цвет {color_id}")
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+        r = f"🔍 Не нашла {color_emoji} {color_name} событий в ближайшие 90 дней."
+        await update.message.reply_text(r)
+        return r
+
+    color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+    tz = ZoneInfo(tz_name)
+    direction = "вперёд" if offset_days > 0 else "назад"
+    abs_days = abs(offset_days)
+    target_label = target_date.strftime("%d.%m.%Y")
+
+    lines = [
+        f"📅 Найдено {len(events)} {color_emoji} событий.\n"
+        f"Перенести на {target_label} ({abs_days} дн. {direction})?\n"
+    ]
+    for e in events:
+        start = e["start_time"].astimezone(tz)
+        lines.append(f"• {start.strftime('%d.%m %H:%M')} — {e['title']}")
+    lines.append("\nНапиши «да» или «отмена».")
+
+    set_pending(user_id, "move_by_color_confirm", {
+        "events": events,
+        "offset_days": offset_days,
+        "target_label": target_label,
+    })
+    r = "\n".join(lines)
     await update.message.reply_text(r)
     return r
 

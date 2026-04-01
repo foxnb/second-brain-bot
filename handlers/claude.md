@@ -2,7 +2,7 @@
 
 > Этот файл содержит всё, что нужно чтобы продолжить разработку.
 > Положить в корень репозитория как `CLAUDE.md`.
-> Последнее обновление: 31.03.2026
+> Последнее обновление: 01.04.2026
 
 ---
 
@@ -47,27 +47,25 @@ Telegram → PWA → VK/Max → iOS/Android.
 second-brain-bot/
 ├── main.py                  # Starlette app, webhook, команды /start /auth /timezone /colors /disconnect /logout /deletedata
 ├── Dockerfile               # python:3.13-slim, git для pip install
-├── requirements.txt         # python-telegram-bot from GitHub, together, google-auth, asyncpg, starlette, uvicorn
+├── requirements.txt         # python-telegram-bot from GitHub, together, google-auth, asyncpg, starlette, uvicorn, httpx
 ├── credentials.json         # Google OAuth (в .gitignore)
 ├── .env                     # Локальные переменные (в .gitignore)
 ├── handlers/
 │   ├── router.py            # Точка входа: текст → AI парсит → роутинг по intent
 │   ├── pending.py           # Мультишаговые диалоги (_pending_actions dict с TTL)
-│   ├── events.py            # Создание, показ, удаление событий + цветовые кружочки
+│   ├── events.py            # Создание, показ, удаление, перенос по цвету + цветовые кружочки
+│   ├── delete.py            # Массовое удаление событий по фильтру (bulk_delete_events)
 │   ├── reminders.py         # Создание напоминаний
 │   ├── lists.py             # CRUD списков (checklist + collection)
 │   ├── utils.py             # resolve_user, get_user_now, extract_number, format_date_label
-│   ├── delete.py            # пустой (удаление через events.py)
-│   ├── search.py            # пустой (зарезервирован)
-│   └── voice.py             # пустой (зарезервирован)
+│   ├── search.py            # зарезервирован: поиск событий
+│   └── voice.py             # зарезервирован: голосовые сообщения
 ├── services/
 │   ├── ai.py                # Together AI — парсинг текста в JSON {intent, title, date, time, ...}
-│   ├── calendar.py          # Google Calendar OAuth + create_event/delete_event (пишут в БД)
+│   ├── calendar.py          # Google Calendar OAuth + create/delete/move event (пишут в БД)
 │   ├── database.py          # asyncpg CRUD: users, auth_methods, calendar_connections, events, reminders, lists, color_mappings
 │   └── sync.py              # Ленивая sync Google Calendar → events (syncToken, 410 fallback)
-├── models/
-│   └── event.py             # пустой
-└── revory_db_schema_v7.md   # устарел, актуальная схема v9 в проекте Claude
+└── revory_db_schema_v9.md   # актуальная схема БД
 ```
 
 ---
@@ -110,7 +108,7 @@ second-brain-bot/
 ### Pending actions
 Мультишаговые диалоги через `_pending_actions` dict с 5-минутным TTL.
 Паттерн: set_pending() → пользователь отвечает → handle_pending() → clear_pending().
-Используется для: delete_choice, create_list_confirm, add_to_list_choice, delete_list_choice, color_setup, color_edit.
+Используется для: delete_choice, create_list_confirm, add_to_list_choice, delete_list_choice, color_setup, color_edit, bulk_delete_confirm, move_by_color_confirm.
 
 ### Списки
 Два типа: `checklist` (с чекбоксами, auto_archive_at) и `collection` (без чекбоксов, постоянные).
@@ -137,7 +135,9 @@ Google Calendar colorId (1-11) → color_mappings (label + emoji).
 |--------|----------|--------|
 | create_event | Создать событие | "встреча завтра в 15:00" |
 | show_events | Показать расписание | "что у меня сегодня?" |
-| delete_event | Удалить событие | "удали встречу с Аней" |
+| delete_event | Удалить одно событие по названию | "удали встречу с Аней" |
+| bulk_delete_events | Удалить все события по фильтру | "удали все красные события", "удали всё сегодня" |
+| move_by_color | Перенести события по цвету на другую дату | "перенеси синие на следующую неделю" |
 | remind | Напоминание | "напомни купить молоко в 10" |
 | create_list | Создать список | "список покупок: молоко, хлеб" |
 | add_to_list | Добавить в список | "добавь яблоки в покупки" |
@@ -187,11 +187,12 @@ Google Calendar colorId (1-11) → color_mappings (label + emoji).
 
 ## Бэклог
 
-### Критические баги (исправить первыми)
-- [ ] Пустые файлы: `delete.py`, `search.py`, `voice.py`, `models/event.py` — либо удалить, либо заполнить
-- [ ] `revory_db_schema_v7.md` в репозитории устарел — заменить на v9
+### Критические баги — закрыты
+- [x] Пустые файлы: `models/event.py` + папка `models/` удалены; `delete.py` реализован; `search.py`, `voice.py` зарезервированы
+- [x] `revory_db_schema_v7.md` заменён на v9
+- [x] `httpx` добавлен в requirements.txt
 
-### В работе: цветовая модель (color_mappings)
+### Цветовая модель — закрыта
 - [x] SQL миграция: таблица color_mappings + users.colors_asked
 - [x] database.py: color_mappings CRUD + обновлённые upsert_event/get_events_from_db
 - [x] sync.py: сохраняет colorId из Google API
@@ -200,18 +201,27 @@ Google Calendar colorId (1-11) → color_mappings (label + emoji).
 - [x] ai.py: intent setup_colors
 - [x] router.py: роутинг setup_colors
 - [x] main.py: /colors команда
-- [ ] **Тестирование**: проверить что парсер работает на реальных данных (фикс от 31.03 ещё не задеплоен?)
-- [ ] **move_by_color**: "перенеси все синие на следующую неделю" — пока не реализован
+- [ ] **Тестирование**: проверить парсер на реальных данных в проде
+
+### Bulk operations — реализованы (01.04.2026)
+- [x] **bulk_delete_events**: удаление событий по фильтру (цвет + период) с подтверждением
+  - `handlers/delete.py`: handle_bulk_delete
+  - `handlers/pending.py`: bulk_delete_confirm
+  - `services/database.py`: get_events_by_color
+- [x] **move_by_color**: перенос событий по цвету на другую дату (смещение offset_days)
+  - `handlers/events.py`: handle_move_by_color
+  - `handlers/pending.py`: move_by_color_confirm
+  - `services/calendar.py`: move_event (patch + update DB)
+  - `services/database.py`: update_event_times
 
 ### Ближайшие задачи
-- [ ] **Composite commands**: "удали X, а Y поменяй на Z" — сейчас бот понимает только один intent за раз
-- [ ] **Bulk deletion**: удаление нескольких событий/напоминаний
+- [ ] **edit_event**: редактирование существующего события (название, время, цвет)
 - [ ] **edit_list_item**: редактирование элементов списка (не только check/remove)
 - [ ] **Шифрование токенов**: AES-256-Fernet для calendar_connections (ENCRYPTION_KEY env)
 - [ ] **grammar_form**: использовать m/f/n для грамматически корректных ответов ("свободен"/"свободна"/"свободно")
 - [ ] **Поиск событий**: "когда у меня следующая встреча с Аней?" — handlers/search.py
 - [ ] **Голосовые**: распознавание voice messages → текст → AI парсинг — handlers/voice.py
-- [ ] **httpx в requirements.txt**: используется в revoke_google_token, но не в requirements
+- [ ] **Composite commands**: "удали X, а Y поменяй на Z" — сейчас бот понимает только один intent за раз
 
 ### Средний горизонт
 - [ ] **PWA**: email+password auth (архитектура готова: users.email, users.password_hash, auth_methods provider='email')

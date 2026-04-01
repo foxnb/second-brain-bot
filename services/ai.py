@@ -22,7 +22,7 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 Верни ТОЛЬКО JSON (без markdown, без ```), строго по формату:
 
 {{
-  "intent": "create_event" | "show_events" | "delete_event" | "remind" | "create_list" | "add_to_list" | "show_list" | "check_items" | "remove_from_list" | "delete_list" | "show_lists" | "setup_colors" | "change_timezone" | "connect_calendar" | "delete_account" | "help" | "chitchat" | "unknown",
+  "intent": "create_event" | "show_events" | "delete_event" | "bulk_delete_events" | "move_by_color" | "remind" | "create_list" | "add_to_list" | "show_list" | "check_items" | "remove_from_list" | "delete_list" | "show_lists" | "setup_colors" | "change_timezone" | "connect_calendar" | "delete_account" | "help" | "chitchat" | "unknown",
   "title": "название события/напоминания" или null,
   "date": "YYYY-MM-DD" или null,
   "time": "HH:MM" или null,
@@ -38,7 +38,9 @@ SYSTEM_PROMPT = """Ты — AI-ассистент Revory. Твоя задача 
 ИНТЕНТЫ:
 - create_event — создать событие/встречу: "встреча завтра в 15:00", "запланируй обед", "поставь созвон"
 - show_events — показать расписание: "что у меня сегодня", "расписание на завтра", "планы на неделю"
-- delete_event — удалить событие: "удали встречу с Иваном", "отмени обед"
+- delete_event — удалить ОДНО событие по названию: "удали встречу с Иваном", "отмени обед"
+- bulk_delete_events — удалить ВСЕ события по фильтру (цвет и/или период): "удали все события сегодня", "удали все красные события", "удали всё на этой неделе". Используй color_id если указан цвет, period/date для временного диапазона.
+- move_by_color — перенести события определённого цвета на другую дату: "перенеси все синие на следующую неделю", "сдвинь красные на завтра", "перенеси зелёные на 10 апреля". Обязательно color_id + date (целевая дата).
 - remind — поставить напоминание: "напомни позвонить", "не забудь купить", "remind me"
 - create_list — создать список С элементами: "список покупок: молоко, хлеб", "создай список фильмов"
 - add_to_list — добавить в СУЩЕСТВУЮЩИЙ список: "добавь яблоки в покупки", "добавь Интерстеллар в список фильмов"
