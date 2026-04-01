@@ -77,10 +77,12 @@ async def handle_create(update: Update, user_id, parsed: dict):
         r = "🤔 Не понял название события. Попробуй ещё раз."
         await update.message.reply_text(r)
         return r
-    if not date_str or not time_str:
-        r = f"📅 {parsed.get('reply', 'Укажи дату и время для события.')}"
+    if not date_str:
+        r = f"📅 {parsed.get('reply', 'Укажи дату для события.')}"
         await update.message.reply_text(r)
         return r
+    if not time_str:
+        time_str = "09:00"  # дефолтное время если не указано
     try:
         start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:
