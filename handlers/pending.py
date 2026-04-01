@@ -82,6 +82,8 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_move_by_color_confirm(update, user_id, text, pending)
     if action == "create_duplicate_confirm":
         return await _handle_create_duplicate_confirm(update, user_id, text, pending)
+    if action == "task_destination_choice":
+        return await _handle_task_destination_choice(update, user_id, text, pending)
     return False
 
 
@@ -211,6 +213,85 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Выбор места хранения «дел» ──────────────────────────
+
+async def _handle_task_destination_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Обрабатывает выбор куда записывать «дела»: в календарь или список."""
+    lower = text.lower().strip()
+    from services.database import set_task_destination
+
+    if any(w in lower for w in ("календарь", "calendar", "1", "в кал", "в гугл")):
+        dest = "calendar"
+    elif any(w in lower for w in ("список", "list", "2", "в список", "в лист")):
+        dest = "list"
+    else:
+        r = "Напиши «календарь» или «список» 😊"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    await set_task_destination(user_id, dest)
+    label = "📅 Календарь" if dest == "calendar" else "📋 Список"
+    r_saved = f"✅ Запомнила! «Дела» → {label}\n\nИзменить потом: «записывай дела в список» / «в календарь»"
+    await update.message.reply_text(r_saved)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r_saved)
+
+    # Теперь выполняем исходный запрос с выбранным назначением
+    parsed = pending.get("parsed", {})
+    clear_pending(user_id)
+    if not parsed:
+        return True
+
+    original_intent = parsed.get("intent")
+    from handlers.utils import get_user_now
+
+    if dest == "calendar":
+        # Выполняем как create_event или show_events
+        if original_intent in ("create_list", "add_to_list"):
+            items = parsed.get("items") or []
+            title = ", ".join(items) if items else (parsed.get("list_name") or parsed.get("title") or "Дела")
+            date_str = parsed.get("date")
+            time_str = parsed.get("time")
+            if date_str and time_str:
+                from handlers.events import handle_create
+                new_parsed = {**parsed, "intent": "create_event", "title": title}
+                from services.calendar import get_credentials
+                creds = await get_credentials(user_id)
+                if creds:
+                    reply_text = await handle_create(update, user_id, new_parsed)
+                    await save_message(user_id, "assistant", reply_text or "")
+                else:
+                    r = "🔑 Подключи Google Calendar (/auth) чтобы записывать в календарь."
+                    await update.message.reply_text(r)
+                    await save_message(user_id, "assistant", r)
+            else:
+                r = "📅 Укажи дату и время для записи в календарь."
+                await update.message.reply_text(r)
+                await save_message(user_id, "assistant", r)
+        elif original_intent == "show_list":
+            from handlers.events import handle_show
+            user_now, tz_name = await get_user_now(user_id)
+            new_parsed = {**parsed, "intent": "show_events"}
+            reply_text = await handle_show(update, user_id, new_parsed, user_now, tz_name)
+            await save_message(user_id, "assistant", reply_text or "")
+    else:
+        # Выполняем как create_list или show_list
+        if original_intent in ("create_event", "create_list", "add_to_list"):
+            from handlers.lists import handle_create_list
+            user_now, tz_name = await get_user_now(user_id)
+            new_parsed = {**parsed, "intent": "create_list"}
+            reply_text = await handle_create_list(update, user_id, new_parsed, user_now)
+            await save_message(user_id, "assistant", reply_text or "")
+        elif original_intent in ("show_events", "show_list"):
+            from handlers.lists import handle_show_list
+            reply_text = await handle_show_list(update, user_id, parsed)
+            await save_message(user_id, "assistant", reply_text or "")
+
     return True
 
 

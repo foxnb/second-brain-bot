@@ -106,6 +106,28 @@ async def update_user_email(user_id: UUID, email: str):
     logger.info(f"Set user email {email} for {user_id}")
 
 
+# ─── Task destination preference ─────────────────────────
+
+async def get_task_destination(user_id: UUID) -> Optional[str]:
+    """Возвращает предпочтение пользователя: 'calendar', 'list' или None (не задано)."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT task_destination FROM users WHERE id = $1",
+        user_id,
+    )
+    return row["task_destination"] if row else None
+
+
+async def set_task_destination(user_id: UUID, destination: str):
+    """Сохраняет предпочтение пользователя: 'calendar' или 'list'."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET task_destination = $1 WHERE id = $2",
+        destination, user_id,
+    )
+    logger.info(f"Set task_destination={destination} for user {user_id}")
+
+
 # ─── Timezone ─────────────────────────────────────────────
 
 async def save_timezone(user_id: UUID, timezone: str):
