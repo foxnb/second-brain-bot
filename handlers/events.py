@@ -68,6 +68,42 @@ def _get_event_emoji(color_id, mappings_dict):
     return GOOGLE_COLOR_EMOJI.get(color_id, "•")
 
 
+async def _find_free_slot(user_id, date_str: str, preferred_time: str = "09:00") -> str:
+    """
+    Возвращает первое свободное время начиная с preferred_time с шагом 1 час.
+    Слот считается занятым если в БД есть событие, которое перекрывает [slot, slot+1h).
+    Перебирает не более 8 часов вперёд, после чего возвращает preferred_time.
+    """
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return preferred_time
+
+    h, m = map(int, preferred_time.split(":"))
+    day_start = day.replace(hour=0, minute=0, second=0)
+    day_end = day.replace(hour=23, minute=59, second=59)
+
+    events = await get_events_from_db(user_id, day_start, day_end + timedelta(seconds=1))
+    # Строим список занятых интервалов (start, end)
+    busy: list[tuple[datetime, datetime]] = []
+    for e in events:
+        s = e["start_time"].replace(tzinfo=None) if e["start_time"].tzinfo else e["start_time"]
+        en = e["end_time"].replace(tzinfo=None) if e["end_time"].tzinfo else e["end_time"]
+        busy.append((s, en))
+
+    slot_start = day.replace(hour=h, minute=m, second=0, microsecond=0)
+    for _ in range(9):  # пробуем до 8 часов вперёд
+        slot_end = slot_start + timedelta(hours=1)
+        conflict = any(s < slot_end and en > slot_start for s, en in busy)
+        if not conflict:
+            return slot_start.strftime("%H:%M")
+        slot_start += timedelta(hours=1)
+        if slot_start.hour >= 22:
+            break
+
+    return preferred_time  # если не нашли — возвращаем исходное
+
+
 async def handle_create(update: Update, user_id, parsed: dict):
     """Создаёт событие в Google Calendar + зеркало в БД."""
     title = parsed.get("title")
@@ -77,10 +113,12 @@ async def handle_create(update: Update, user_id, parsed: dict):
         r = "🤔 Не понял название события. Попробуй ещё раз."
         await update.message.reply_text(r)
         return r
-    if not date_str or not time_str:
-        r = f"📅 {parsed.get('reply', 'Укажи дату и время для события.')}"
+    if not date_str:
+        r = f"📅 {parsed.get('reply', 'Укажи дату для события.')}"
         await update.message.reply_text(r)
         return r
+    if not time_str:
+        time_str = await _find_free_slot(user_id, date_str, preferred_time="09:00")
     try:
         start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:

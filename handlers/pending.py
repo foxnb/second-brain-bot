@@ -218,16 +218,47 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
 
 # ─── Выбор места хранения «дел» ──────────────────────────
 
+# Слова, означающие новую команду — не ответ на вопрос
+_ACTION_VERBS = (
+    "запиши", "добавь", "создай", "покажи", "запланируй", "напомни",
+    "удали", "отмени", "перенеси", "сдвинь", "поставь", "забронируй",
+    "отметь", "составь", "расскажи", "что у меня", "что на",
+)
+
+# Слова откладывания
+_DEFER_WORDS = (
+    "потом", "позже", "попозже", "позже скажу", "не сейчас",
+    "позже напишу", "напишу потом", "сделаю позже", "позже выберу",
+)
+
+
 async def _handle_task_destination_choice(update: Update, user_id, text: str, pending: dict) -> bool:
     """Обрабатывает выбор куда записывать «дела»: в календарь или список."""
     lower = text.lower().strip()
     from services.database import set_task_destination
 
+    # Пользователь откладывает — снимаем pending и отпускаем
+    if any(w in lower for w in _DEFER_WORDS):
+        clear_pending(user_id)
+        r = "Хорошо! Напиши когда будешь готова — всё сделаем 😊"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Новая команда (длинный текст с глаголами действий) — снимаем pending,
+    # возвращаем False чтобы router обработал как обычное сообщение
+    if len(text) > 20 or any(v in lower for v in _ACTION_VERBS):
+        clear_pending(user_id)
+        return False
+
+    # Определяем выбор: только короткий ответ "календарь"/"список"/"1"/"2"
     if any(w in lower for w in ("календарь", "calendar", "1", "в кал", "в гугл")):
         dest = "calendar"
     elif any(w in lower for w in ("список", "list", "2", "в список", "в лист")):
         dest = "list"
     else:
+        # Непонятный короткий ответ — переспрашиваем
         r = "Напиши «календарь» или «список» 😊"
         await update.message.reply_text(r)
         await save_message(user_id, "user", text)
@@ -236,12 +267,12 @@ async def _handle_task_destination_choice(update: Update, user_id, text: str, pe
 
     await set_task_destination(user_id, dest)
     label = "📅 Календарь" if dest == "calendar" else "📋 Список"
-    r_saved = f"✅ Запомнила! «Дела» → {label}\n\nИзменить потом: «записывай дела в список» / «в календарь»"
+    r_saved = f"✅ Запомнила! «Дела» → {label}\n\nИзменить: «записывай дела в список» / «в календарь»"
     await update.message.reply_text(r_saved)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r_saved)
 
-    # Теперь выполняем исходный запрос с выбранным назначением
+    # Выполняем исходный запрос с выбранным назначением
     parsed = pending.get("parsed", {})
     clear_pending(user_id)
     if not parsed:
@@ -251,41 +282,32 @@ async def _handle_task_destination_choice(update: Update, user_id, text: str, pe
     from handlers.utils import get_user_now
 
     if dest == "calendar":
-        # Выполняем как create_event или show_events
-        if original_intent in ("create_list", "add_to_list"):
+        if original_intent in ("create_list", "add_to_list", "create_event"):
             items = parsed.get("items") or []
             title = ", ".join(items) if items else (parsed.get("list_name") or parsed.get("title") or "Дела")
             date_str = parsed.get("date")
-            time_str = parsed.get("time")
-            if date_str and time_str:
-                from handlers.events import handle_create
-                new_parsed = {**parsed, "intent": "create_event", "title": title}
-                from services.calendar import get_credentials
-                creds = await get_credentials(user_id)
-                if creds:
-                    reply_text = await handle_create(update, user_id, new_parsed)
-                    await save_message(user_id, "assistant", reply_text or "")
-                else:
-                    r = "🔑 Подключи Google Calendar (/auth) чтобы записывать в календарь."
-                    await update.message.reply_text(r)
-                    await save_message(user_id, "assistant", r)
+            time_str = parsed.get("time") or "09:00"
+            new_parsed = {**parsed, "intent": "create_event", "title": title, "time": time_str}
+            from handlers.events import handle_create
+            from services.calendar import get_credentials
+            creds = await get_credentials(user_id)
+            if creds:
+                reply_text = await handle_create(update, user_id, new_parsed)
+                await save_message(user_id, "assistant", reply_text or "")
             else:
-                r = "📅 Укажи дату и время для записи в календарь."
+                r = "🔑 Подключи Google Calendar (/auth) чтобы записывать в календарь."
                 await update.message.reply_text(r)
                 await save_message(user_id, "assistant", r)
-        elif original_intent == "show_list":
+        elif original_intent in ("show_list", "show_events"):
             from handlers.events import handle_show
             user_now, tz_name = await get_user_now(user_id)
-            new_parsed = {**parsed, "intent": "show_events"}
-            reply_text = await handle_show(update, user_id, new_parsed, user_now, tz_name)
+            reply_text = await handle_show(update, user_id, {**parsed, "intent": "show_events"}, user_now, tz_name)
             await save_message(user_id, "assistant", reply_text or "")
     else:
-        # Выполняем как create_list или show_list
         if original_intent in ("create_event", "create_list", "add_to_list"):
             from handlers.lists import handle_create_list
             user_now, tz_name = await get_user_now(user_id)
-            new_parsed = {**parsed, "intent": "create_list"}
-            reply_text = await handle_create_list(update, user_id, new_parsed, user_now)
+            reply_text = await handle_create_list(update, user_id, {**parsed, "intent": "create_list"}, user_now)
             await save_message(user_id, "assistant", reply_text or "")
         elif original_intent in ("show_events", "show_list"):
             from handlers.lists import handle_show_list
