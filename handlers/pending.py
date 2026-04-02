@@ -278,30 +278,39 @@ async def _handle_change_color_choice(update: Update, user_id, text: str, pendin
         await save_message(user_id, "assistant", r)
         return True
 
-    if number is None or number < 1 or number > len(matches):
-        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
-        await update.message.reply_text(r)
-        await save_message(user_id, "user", text)
-        await save_message(user_id, "assistant", r)
-        return True
+    # "оба" / "обе" / "все" — применить ко всем
+    apply_all = lower in ("оба", "обе", "всё", "все", "all", "обоим", "обоих")
+    events_to_color = matches if apply_all else None
 
-    event = matches[number - 1]
+    if not apply_all:
+        if number is None or number < 1 or number > len(matches):
+            r = f"❌ Введи число от 1 до {len(matches)}, «оба» или «отмена»."
+            await update.message.reply_text(r)
+            await save_message(user_id, "user", text)
+            await save_message(user_id, "assistant", r)
+            return True
+        events_to_color = [matches[number - 1]]
+
     clear_pending(user_id)
 
     from services.calendar import patch_event_color
     from handlers.events import GOOGLE_COLOR_EMOJI, GOOGLE_COLOR_NAME_RU
 
-    external_id = event.get("external_event_id")
-    if not external_id:
-        r = "❌ Событие не привязано к Google Calendar."
-    else:
-        success = await patch_event_color(user_id, external_id, color_id)
-        if success:
-            color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
-            color_name = GOOGLE_COLOR_NAME_RU.get(color_id, "")
-            r = f"✅ «{event['title']}» отмечено {color_emoji} {color_name}"
+    color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+    color_name = GOOGLE_COLOR_NAME_RU.get(color_id, "")
+    done_count = 0
+    for event in events_to_color:
+        external_id = event.get("external_event_id")
+        if external_id and await patch_event_color(user_id, external_id, color_id):
+            done_count += 1
+
+    if done_count == len(events_to_color):
+        if len(events_to_color) == 1:
+            r = f"✅ «{events_to_color[0]['title']}» отмечено {color_emoji} {color_name}"
         else:
-            r = "❌ Не удалось изменить цвет. Попробуй позже."
+            r = f"✅ {done_count} событий отмечено {color_emoji} {color_name}"
+    else:
+        r = f"⚠️ Отмечено {done_count} из {len(events_to_color)}."
 
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
