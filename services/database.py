@@ -617,6 +617,23 @@ async def get_events_by_color(
     return [dict(r) for r in rows]
 
 
+async def update_event_color(
+    external_event_id: str,
+    connection_id: int,
+    color_id: int,
+) -> None:
+    """Обновляет color_id события по external_event_id."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE events SET color_id = $1, updated_at = now()
+        WHERE external_event_id = $2 AND calendar_connection_id = $3
+          AND is_deleted = FALSE
+        """,
+        color_id, external_event_id, connection_id,
+    )
+
+
 async def update_event_times(
     external_event_id: str,
     connection_id: int,

@@ -491,6 +491,77 @@ async def _do_reschedule(update, user_id, event: dict, target_date, target_time_
     return r
 
 
+async def handle_change_color(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Меняет цвет существующего события по названию."""
+    from services.calendar import patch_event_color
+
+    title_query = (parsed.get("title") or "").lower()
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, float):
+        color_id = int(color_id)
+
+    if not color_id:
+        r = "🎨 Укажи цвет. Например: «отметь встречу красным» или «пометь обед синим»"
+        await update.message.reply_text(r)
+        return r
+
+    if not title_query:
+        # Попробуем взять последнее упомянутое событие из истории (ищем в ближ. 7 дней)
+        search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        search_max = search_min + timedelta(days=7)
+        events = await get_events_from_db(user_id, search_min, search_max)
+        if not events:
+            r = "🤔 Какое событие отметить? Напиши, например: «отметь встречу с Аней красным»"
+            await update.message.reply_text(r)
+            return r
+        # Берём ближайшее предстоящее
+        event = events[0]
+        matches = [event]
+    else:
+        try:
+            await sync_calendar(user_id)
+        except Exception as e:
+            logger.error(f"Sync failed before change_color: {e}")
+
+        search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        search_max = search_min + timedelta(days=90)
+        matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+        if not matches:
+            r = f"🔍 Не нашла событие «{parsed.get('title')}»."
+            await update.message.reply_text(r)
+            return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = ["Нашла несколько совпадений. Какое отметить?\n"]
+        for i, e in enumerate(matches, 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        set_pending(user_id, "change_color_choice", {"matches": matches, "color_id": color_id})
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    event = matches[0]
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Событие не привязано к Google Calendar."
+        await update.message.reply_text(r)
+        return r
+
+    success = await patch_event_color(user_id, external_id, color_id)
+    if success:
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+        color_name = GOOGLE_COLOR_NAME_RU.get(color_id, "")
+        r = f"✅ «{event['title']}» отмечено {color_emoji} {color_name}"
+    else:
+        r = "❌ Не удалось изменить цвет. Попробуй позже."
+    await update.message.reply_text(r)
+    return r
+
+
 async def handle_delete(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
     """Удаляет событие: ищет в БД, удаляет из Google + мягкое удаление."""
     title_query = (parsed.get("title") or "").lower()

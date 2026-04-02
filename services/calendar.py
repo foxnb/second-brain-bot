@@ -312,6 +312,30 @@ async def move_event(
         return False
 
 
+async def patch_event_color(user_id: UUID, external_event_id: str, color_id: int) -> bool:
+    """Меняет цвет события в Google Calendar + обновляет в БД."""
+    service = await _get_service(user_id)
+    if not service:
+        return False
+    try:
+        service.events().patch(
+            calendarId="primary",
+            eventId=external_event_id,
+            body={"colorId": str(color_id)},
+        ).execute()
+        logger.info(f"Patched color={color_id} for event {external_event_id}")
+
+        conn_data = await load_calendar_connection(user_id, provider="google")
+        if conn_data:
+            from services.database import update_event_color
+            await update_event_color(external_event_id, conn_data["id"], color_id)
+
+        return True
+    except Exception as e:
+        logger.error(f"Patch color error for {external_event_id}: {e}")
+        return False
+
+
 async def revoke_google_token(access_token: str) -> bool:
     """Отзывает Google OAuth токен (GDPR compliance)."""
     try:
