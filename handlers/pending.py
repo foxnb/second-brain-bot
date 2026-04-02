@@ -84,6 +84,8 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_create_duplicate_confirm(update, user_id, text, pending)
     if action == "task_destination_choice":
         return await _handle_task_destination_choice(update, user_id, text, pending)
+    if action == "reschedule_choice":
+        return await _handle_reschedule_choice(update, user_id, text, pending)
     return False
 
 
@@ -213,6 +215,47 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Перенос конкретного события (disambig) ──────────────
+
+async def _handle_reschedule_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор события для переноса из нескольких совпадений."""
+    matches = pending.get("matches", [])
+    target_date = pending.get("target_date")
+    target_time = pending.get("target_time")
+
+    number = extract_number(text)
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if number is None or number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    event = matches[number - 1]
+    clear_pending(user_id)
+
+    from handlers.events import _do_reschedule
+    from handlers.utils import get_user_now
+    from datetime import date as _date
+
+    user_now, tz_name = await get_user_now(user_id)
+    td = datetime.strptime(target_date, "%Y-%m-%d").date() if target_date else user_now.date()
+    r = await _do_reschedule(update, user_id, event, td, target_time, tz_name)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r or "")
     return True
 
 

@@ -16,7 +16,7 @@ from services.database import (
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule
 from handlers.delete import handle_bulk_delete
 from handlers.reminders import handle_remind
 from handlers.lists import (
@@ -143,6 +143,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "move_by_color":
         reply_text = await handle_move_by_color(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "reschedule_event":
+        reply_text = await handle_reschedule(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "remind":
         reply_text = await handle_remind(update, user_id, parsed, user_now, tz_name)

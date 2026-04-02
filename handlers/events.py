@@ -332,10 +332,6 @@ async def handle_move_by_color(
             return r
 
     offset_days = (target_date - user_now.date()).days
-    if offset_days == 0:
-        r = "📅 Это уже сегодня! Укажи другую дату."
-        await update.message.reply_text(r)
-        return r
 
     # Ищем события с этим цветом в ближайшие 90 дней
     time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -388,6 +384,109 @@ async def handle_move_by_color(
         "target_label": target_label,
     })
     r = "\n".join(lines)
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_reschedule(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Переносит конкретное событие (по названию) на новую дату/время."""
+    from services.calendar import move_event
+    from zoneinfo import ZoneInfo
+
+    title_query = (parsed.get("title") or "").lower()
+    if not title_query:
+        r = "🤔 Какое событие перенести? Напиши, например: «перенеси встречу с Аней на пятницу»"
+        await update.message.reply_text(r)
+        return r
+
+    target_date_str = parsed.get("date")
+    target_time_str = parsed.get("time")
+    period = parsed.get("period")
+
+    # Вычисляем целевую дату
+    if target_date_str:
+        try:
+            target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = user_now.date()
+    elif period == "tomorrow":
+        target_date = (user_now + timedelta(days=1)).date()
+    elif period == "today":
+        target_date = user_now.date()
+    else:
+        r = "📅 Укажи дату для переноса. Например: «перенеси встречу на пятницу» или «на 10 апреля»"
+        await update.message.reply_text(r)
+        return r
+
+    # Ищем событие в ближайшие 90 дней
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before reschedule: {e}")
+
+    search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    search_max = search_min + timedelta(days=90)
+    matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+    if not matches:
+        r = f"🔍 Не нашла событие «{parsed.get('title')}» в ближайшие 90 дней."
+        await update.message.reply_text(r)
+        return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = ["Нашла несколько совпадений. Какое перенести?\n"]
+        for i, e in enumerate(matches, 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        set_pending(user_id, "reschedule_choice", {
+            "matches": matches,
+            "target_date": target_date.isoformat(),
+            "target_time": target_time_str,
+        })
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    return await _do_reschedule(update, user_id, matches[0], target_date, target_time_str, tz_name)
+
+
+async def _do_reschedule(update, user_id, event: dict, target_date, target_time_str, tz_name: str):
+    """Выполняет перенос одного события."""
+    from services.calendar import move_event
+    from zoneinfo import ZoneInfo
+    from datetime import date as _date
+
+    tz = ZoneInfo(tz_name)
+    old_start = event["start_time"]
+    old_end = event["end_time"]
+    duration = old_end - old_start
+
+    if isinstance(target_date, str):
+        target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+
+    if target_time_str:
+        h, m = map(int, target_time_str.split(":"))
+    else:
+        # Сохраняем оригинальное время
+        old_local = old_start.astimezone(tz)
+        h, m = old_local.hour, old_local.minute
+
+    new_start = datetime(target_date.year, target_date.month, target_date.day, h, m, tzinfo=tz)
+    new_end = new_start + duration
+
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Не могу перенести: событие не привязано к Google Calendar."
+        await update.message.reply_text(r)
+        return r
+
+    success = await move_event(user_id, external_id, new_start, new_end)
+    if success:
+        r = f"✅ Перенесено: «{event['title']}» → {new_start.strftime('%d.%m.%Y в %H:%M')}"
+    else:
+        r = "❌ Не удалось перенести событие. Попробуй позже."
     await update.message.reply_text(r)
     return r
 
