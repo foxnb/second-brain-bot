@@ -102,18 +102,16 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
 async def _handle_delete_choice(update: Update, user_id, text: str, pending: dict) -> bool:
     """Обрабатывает выбор номера для удаления события."""
     matches = pending.get("matches", [])
+    lower = text.lower().strip()
     number = extract_number(text)
-    if number is None:
-        lower = text.lower().strip()
-        if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
-            clear_pending(user_id)
-            r = "👌 Отменено."
-            await update.message.reply_text(r)
-            await save_message(user_id, "user", text)
-            await save_message(user_id, "assistant", r)
-            return True
-        return False
-    if number < 1 or number > len(matches):
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+    if number is None or number < 1 or number > len(matches):
         r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
         await update.message.reply_text(r)
         await save_message(user_id, "user", text)
@@ -169,18 +167,16 @@ async def _handle_add_to_list_choice(update: Update, user_id, text: str, pending
     """Обрабатывает выбор списка для добавления."""
     matches = pending.get("matches", [])
     items = pending.get("items", [])
+    lower = text.lower().strip()
     number = extract_number(text)
-    if number is None:
-        lower = text.lower().strip()
-        if lower in ("отмена", "отмени", "нет", "cancel"):
-            clear_pending(user_id)
-            r = "👌 Отменено."
-            await update.message.reply_text(r)
-            await save_message(user_id, "user", text)
-            await save_message(user_id, "assistant", r)
-            return True
-        return False
-    if number < 1 or number > len(matches):
+    if lower in ("отмена", "отмени", "нет", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+    if number is None or number < 1 or number > len(matches):
         r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
         await update.message.reply_text(r)
         await save_message(user_id, "user", text)
@@ -199,23 +195,42 @@ async def _handle_add_to_list_choice(update: Update, user_id, text: str, pending
 async def _handle_delete_list_choice(update: Update, user_id, text: str, pending: dict) -> bool:
     """Обрабатывает выбор списка для удаления."""
     matches = pending.get("matches", [])
+    lower = text.lower().strip()
     number = extract_number(text)
-    if number is None:
-        lower = text.lower().strip()
-        if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
-            clear_pending(user_id)
-            r = "👌 Отменено."
-            await update.message.reply_text(r)
-            await save_message(user_id, "user", text)
-            await save_message(user_id, "assistant", r)
-            return True
-        return False
-    if number < 1 or number > len(matches):
-        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
         await update.message.reply_text(r)
         await save_message(user_id, "user", text)
         await save_message(user_id, "assistant", r)
         return True
+
+    # Массовое удаление: «все», «все удали», «удали все»
+    if any(w in lower for w in ("все", "всё", "all", "каждый", "каждый из них")):
+        clear_pending(user_id)
+        deleted, failed = 0, 0
+        for m in matches:
+            ok = await archive_list(user_id, m["id"])
+            if ok:
+                deleted += 1
+            else:
+                failed += 1
+        r = f"🗑️ Удалено списков: {deleted}."
+        if failed:
+            r += f" Не удалось: {failed}."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if number is None or number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, «все» или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
     target = matches[number - 1]
     success = await archive_list(user_id, target["id"])
     clear_pending(user_id)
