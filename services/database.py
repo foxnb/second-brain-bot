@@ -106,6 +106,28 @@ async def update_user_email(user_id: UUID, email: str):
     logger.info(f"Set user email {email} for {user_id}")
 
 
+# ─── Task destination preference ─────────────────────────
+
+async def get_task_destination(user_id: UUID) -> Optional[str]:
+    """Возвращает предпочтение пользователя: 'calendar', 'list' или None (не задано)."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT task_destination FROM users WHERE id = $1",
+        user_id,
+    )
+    return row["task_destination"] if row else None
+
+
+async def set_task_destination(user_id: UUID, destination: str):
+    """Сохраняет предпочтение пользователя: 'calendar' или 'list'."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET task_destination = $1 WHERE id = $2",
+        destination, user_id,
+    )
+    logger.info(f"Set task_destination={destination} for user {user_id}")
+
+
 # ─── Timezone ─────────────────────────────────────────────
 
 async def save_timezone(user_id: UUID, timezone: str):
@@ -499,6 +521,36 @@ async def find_event_by_title(
     return [dict(r) for r in rows]
 
 
+async def find_duplicate_event(
+    user_id: UUID,
+    title: str,
+    start_time: datetime,
+    window_minutes: int = 5,
+) -> Optional[dict]:
+    """
+    Ищет событие с тем же названием (точное, case-insensitive) в окне ±window_minutes минут.
+    Используется перед созданием для дедупликации.
+    """
+    pool = await get_pool()
+    from datetime import timedelta
+    t_min = start_time - timedelta(minutes=window_minutes)
+    t_max = start_time + timedelta(minutes=window_minutes)
+    row = await pool.fetchrow(
+        """
+        SELECT id, external_event_id, title, start_time
+        FROM events
+        WHERE user_id = $1
+          AND LOWER(title) = LOWER($2)
+          AND start_time >= $3
+          AND start_time <= $4
+          AND is_deleted = FALSE
+        LIMIT 1
+        """,
+        user_id, title, t_min, t_max,
+    )
+    return dict(row) if row else None
+
+
 async def get_connection_id_for_event(event_id: int) -> Optional[int]:
     """Получает calendar_connection_id по event id."""
     pool = await get_pool()
@@ -563,6 +615,23 @@ async def get_events_by_color(
             user_id, time_min, time_max, limit,
         )
     return [dict(r) for r in rows]
+
+
+async def update_event_color(
+    external_event_id: str,
+    connection_id: int,
+    color_id: int,
+) -> None:
+    """Обновляет color_id события по external_event_id."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE events SET color_id = $1, updated_at = now()
+        WHERE external_event_id = $2 AND calendar_connection_id = $3
+          AND is_deleted = FALSE
+        """,
+        color_id, external_event_id, connection_id,
+    )
 
 
 async def update_event_times(

@@ -15,6 +15,7 @@ from services.sync import sync_calendar
 from services.database import (
     get_events_from_db,
     find_event_by_title,
+    find_duplicate_event,
     soft_delete_event,
     get_color_mappings,
     get_colors_asked,
@@ -67,6 +68,42 @@ def _get_event_emoji(color_id, mappings_dict):
     return GOOGLE_COLOR_EMOJI.get(color_id, "•")
 
 
+async def _find_free_slot(user_id, date_str: str, preferred_time: str = "09:00") -> str:
+    """
+    Возвращает первое свободное время начиная с preferred_time с шагом 1 час.
+    Слот считается занятым если в БД есть событие, которое перекрывает [slot, slot+1h).
+    Перебирает не более 8 часов вперёд, после чего возвращает preferred_time.
+    """
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return preferred_time
+
+    h, m = map(int, preferred_time.split(":"))
+    day_start = day.replace(hour=0, minute=0, second=0)
+    day_end = day.replace(hour=23, minute=59, second=59)
+
+    events = await get_events_from_db(user_id, day_start, day_end + timedelta(seconds=1))
+    # Строим список занятых интервалов (start, end)
+    busy: list[tuple[datetime, datetime]] = []
+    for e in events:
+        s = e["start_time"].replace(tzinfo=None) if e["start_time"].tzinfo else e["start_time"]
+        en = e["end_time"].replace(tzinfo=None) if e["end_time"].tzinfo else e["end_time"]
+        busy.append((s, en))
+
+    slot_start = day.replace(hour=h, minute=m, second=0, microsecond=0)
+    for _ in range(9):  # пробуем до 8 часов вперёд
+        slot_end = slot_start + timedelta(hours=1)
+        conflict = any(s < slot_end and en > slot_start for s, en in busy)
+        if not conflict:
+            return slot_start.strftime("%H:%M")
+        slot_start += timedelta(hours=1)
+        if slot_start.hour >= 22:
+            break
+
+    return preferred_time  # если не нашли — возвращаем исходное
+
+
 async def handle_create(update: Update, user_id, parsed: dict):
     """Создаёт событие в Google Calendar + зеркало в БД."""
     title = parsed.get("title")
@@ -76,10 +113,12 @@ async def handle_create(update: Update, user_id, parsed: dict):
         r = "🤔 Не понял название события. Попробуй ещё раз."
         await update.message.reply_text(r)
         return r
-    if not date_str or not time_str:
-        r = f"📅 {parsed.get('reply', 'Укажи дату и время для события.')}"
+    if not date_str:
+        r = f"📅 {parsed.get('reply', 'Укажи дату для события.')}"
         await update.message.reply_text(r)
         return r
+    if not time_str:
+        time_str = await _find_free_slot(user_id, date_str, preferred_time="09:00")
     try:
         start_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     except ValueError:
@@ -98,6 +137,16 @@ async def handle_create(update: Update, user_id, parsed: dict):
         color_id = int(color_id)
     elif color_id is not None:
         color_id = None
+
+    # Проверка дубликата: то же название + то же время ±5 минут
+    duplicate = await find_duplicate_event(user_id, title, start_time)
+    if duplicate:
+        start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
+        r = f"⚠️ Событие «{title}» на {start_fmt} уже существует. Создать ещё одно?"
+        await update.message.reply_text(r)
+        from handlers.pending import set_pending
+        set_pending(user_id, "create_duplicate_confirm", {"parsed": parsed})
+        return r
 
     result = await create_event(user_id, title, start_time, end_time, color_id=color_id)
     if result:
@@ -283,10 +332,6 @@ async def handle_move_by_color(
             return r
 
     offset_days = (target_date - user_now.date()).days
-    if offset_days == 0:
-        r = "📅 Это уже сегодня! Укажи другую дату."
-        await update.message.reply_text(r)
-        return r
 
     # Ищем события с этим цветом в ближайшие 90 дней
     time_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -306,20 +351,32 @@ async def handle_move_by_color(
         await update.message.reply_text(r)
         return r
 
+    # Если пользователь указал конкретный индекс (первое/второе/одно)
+    event_index = parsed.get("event_index")
+    if isinstance(event_index, float):
+        event_index = int(event_index)
+    if event_index is not None and 1 <= event_index <= len(events):
+        events = [events[event_index - 1]]
+
     color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
     tz = ZoneInfo(tz_name)
     direction = "вперёд" if offset_days > 0 else "назад"
     abs_days = abs(offset_days)
     target_label = target_date.strftime("%d.%m.%Y")
 
+    count_word = f"{len(events)}" if len(events) > 1 else "1"
     lines = [
-        f"📅 Найдено {len(events)} {color_emoji} событий.\n"
+        f"📅 Найдено {count_word} {color_emoji} событий.\n"
         f"Перенести на {target_label} ({abs_days} дн. {direction})?\n"
     ]
-    for e in events:
+    for i, e in enumerate(events, 1):
         start = e["start_time"].astimezone(tz)
-        lines.append(f"• {start.strftime('%d.%m %H:%M')} — {e['title']}")
-    lines.append("\nНапиши «да» или «отмена».")
+        lines.append(f"{i}. {start.strftime('%d.%m %H:%M')} — {e['title']}")
+
+    if len(events) > 1:
+        lines.append("\nНапиши «да» (все), номер (одно) или «отмена».")
+    else:
+        lines.append("\nНапиши «да» или «отмена».")
 
     set_pending(user_id, "move_by_color_confirm", {
         "events": events,
@@ -327,6 +384,180 @@ async def handle_move_by_color(
         "target_label": target_label,
     })
     r = "\n".join(lines)
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_reschedule(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Переносит конкретное событие (по названию) на новую дату/время."""
+    from services.calendar import move_event
+    from zoneinfo import ZoneInfo
+
+    title_query = (parsed.get("title") or "").lower()
+    if not title_query:
+        r = "🤔 Какое событие перенести? Напиши, например: «перенеси встречу с Аней на пятницу»"
+        await update.message.reply_text(r)
+        return r
+
+    target_date_str = parsed.get("date")
+    target_time_str = parsed.get("time")
+    period = parsed.get("period")
+
+    # Вычисляем целевую дату
+    if target_date_str:
+        try:
+            target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = user_now.date()
+    elif period == "tomorrow":
+        target_date = (user_now + timedelta(days=1)).date()
+    elif period == "today":
+        target_date = user_now.date()
+    else:
+        r = "📅 Укажи дату для переноса. Например: «перенеси встречу на пятницу» или «на 10 апреля»"
+        await update.message.reply_text(r)
+        return r
+
+    # Ищем событие в ближайшие 90 дней
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before reschedule: {e}")
+
+    search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    search_max = search_min + timedelta(days=90)
+    matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+    if not matches:
+        r = f"🔍 Не нашла событие «{parsed.get('title')}» в ближайшие 90 дней."
+        await update.message.reply_text(r)
+        return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = ["Нашла несколько совпадений. Какое перенести?\n"]
+        for i, e in enumerate(matches, 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        set_pending(user_id, "reschedule_choice", {
+            "matches": matches,
+            "target_date": target_date.isoformat(),
+            "target_time": target_time_str,
+        })
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    return await _do_reschedule(update, user_id, matches[0], target_date, target_time_str, tz_name)
+
+
+async def _do_reschedule(update, user_id, event: dict, target_date, target_time_str, tz_name: str):
+    """Выполняет перенос одного события."""
+    from services.calendar import move_event
+    from zoneinfo import ZoneInfo
+    from datetime import date as _date
+
+    tz = ZoneInfo(tz_name)
+    old_start = event["start_time"]
+    old_end = event["end_time"]
+    duration = old_end - old_start
+
+    if isinstance(target_date, str):
+        target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+
+    if target_time_str:
+        h, m = map(int, target_time_str.split(":"))
+    else:
+        # Сохраняем оригинальное время
+        old_local = old_start.astimezone(tz)
+        h, m = old_local.hour, old_local.minute
+
+    new_start = datetime(target_date.year, target_date.month, target_date.day, h, m, tzinfo=tz)
+    new_end = new_start + duration
+
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Не могу перенести: событие не привязано к Google Calendar."
+        await update.message.reply_text(r)
+        return r
+
+    success = await move_event(user_id, external_id, new_start, new_end)
+    if success:
+        r = f"✅ Перенесено: «{event['title']}» → {new_start.strftime('%d.%m.%Y в %H:%M')}"
+    else:
+        r = "❌ Не удалось перенести событие. Попробуй позже."
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_change_color(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Меняет цвет существующего события по названию."""
+    from services.calendar import patch_event_color
+
+    title_query = (parsed.get("title") or "").lower()
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, float):
+        color_id = int(color_id)
+
+    if not color_id:
+        r = "🎨 Укажи цвет. Например: «отметь встречу красным» или «пометь обед синим»"
+        await update.message.reply_text(r)
+        return r
+
+    if not title_query:
+        # Попробуем взять последнее упомянутое событие из истории (ищем в ближ. 7 дней)
+        search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        search_max = search_min + timedelta(days=7)
+        events = await get_events_from_db(user_id, search_min, search_max)
+        if not events:
+            r = "🤔 Какое событие отметить? Напиши, например: «отметь встречу с Аней красным»"
+            await update.message.reply_text(r)
+            return r
+        # Берём ближайшее предстоящее
+        event = events[0]
+        matches = [event]
+    else:
+        try:
+            await sync_calendar(user_id)
+        except Exception as e:
+            logger.error(f"Sync failed before change_color: {e}")
+
+        search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        search_max = search_min + timedelta(days=90)
+        matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+        if not matches:
+            r = f"🔍 Не нашла событие «{parsed.get('title')}»."
+            await update.message.reply_text(r)
+            return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = ["Нашла несколько совпадений. Какое отметить?\n"]
+        for i, e in enumerate(matches, 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        set_pending(user_id, "change_color_choice", {"matches": matches, "color_id": color_id})
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    event = matches[0]
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Событие не привязано к Google Calendar."
+        await update.message.reply_text(r)
+        return r
+
+    success = await patch_event_color(user_id, external_id, color_id)
+    if success:
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+        color_name = GOOGLE_COLOR_NAME_RU.get(color_id, "")
+        r = f"✅ «{event['title']}» отмечено {color_emoji} {color_name}"
+    else:
+        r = "❌ Не удалось изменить цвет. Попробуй позже."
     await update.message.reply_text(r)
     return r
 

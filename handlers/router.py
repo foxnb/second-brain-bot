@@ -9,11 +9,14 @@ from telegram.ext import ContextTypes
 
 from services.ai import parse_message
 from services.calendar import get_credentials
-from services.database import load_timezone, save_message, get_recent_messages
+from services.database import (
+    load_timezone, save_message, get_recent_messages,
+    get_task_destination, set_task_destination,
+)
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule, handle_change_color
 from handlers.delete import handle_bulk_delete
 from handlers.reminders import handle_remind
 from handlers.lists import (
@@ -27,6 +30,21 @@ from handlers.lists import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Слова, которые делают запрос неоднозначным (список или календарь?)
+_TASK_KEYWORDS = {"дела", "дело", "задачи", "задача", "задание", "задания", "todo", "дел"}
+
+
+def _is_task_ambiguous(parsed: dict) -> bool:
+    """True если запрос про «дела» — неоднозначно (список или календарь)."""
+    intent = parsed.get("intent")
+    if intent not in ("create_list", "create_event", "show_events", "show_list", "add_to_list"):
+        return False
+    candidate = " ".join(filter(None, [
+        parsed.get("list_name") or "",
+        parsed.get("title") or "",
+    ])).lower()
+    return any(kw in candidate for kw in _TASK_KEYWORDS)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -60,6 +78,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"User {user_id} | Intent: {intent} | Parsed: {parsed}")
     await save_message(user_id, "user", text)
 
+    # --- Перехват неоднозначных «дел» → preference или вопрос ---
+    if _is_task_ambiguous(parsed):
+        dest = await get_task_destination(user_id)
+        if dest is None:
+            # Спрашиваем пользователя
+            from handlers.pending import set_pending
+            set_pending(user_id, "task_destination_choice", {"parsed": parsed})
+            reply_text = (
+                "📋 Куда записывать «дела» по умолчанию?\n\n"
+                "1️⃣ В 📅 Календарь\n"
+                "2️⃣ В 📋 Список\n\n"
+                "Напиши «календарь» или «список» — запомню и сразу выполню."
+            )
+            await update.message.reply_text(reply_text)
+            await save_message(user_id, "assistant", reply_text)
+            return
+        elif dest == "calendar":
+            # Переводим в calendar intent
+            if intent in ("create_list", "add_to_list"):
+                items = parsed.get("items") or []
+                title = parsed.get("title") or parsed.get("list_name") or "Дела"
+                if items:
+                    # Несколько дел — создаём каждое отдельным событием или первое
+                    parsed = {**parsed, "intent": "create_event", "title": ", ".join(items)}
+                else:
+                    parsed = {**parsed, "intent": "create_event"}
+                intent = "create_event"
+            elif intent == "show_list":
+                parsed = {**parsed, "intent": "show_events"}
+                intent = "show_events"
+        else:  # dest == "list"
+            if intent == "show_events":
+                parsed = {**parsed, "intent": "show_list"}
+                intent = "show_list"
+            elif intent == "create_event":
+                parsed = {**parsed, "intent": "create_list"}
+                intent = "create_list"
+
     # --- Проверка календаря для calendar-интентов ---
     CALENDAR_INTENTS = {"create_event", "show_events", "delete_event", "bulk_delete_events", "move_by_color"}
     if intent in CALENDAR_INTENTS:
@@ -87,6 +143,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "move_by_color":
         reply_text = await handle_move_by_color(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "reschedule_event":
+        reply_text = await handle_reschedule(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "change_event_color":
+        reply_text = await handle_change_color(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "remind":
         reply_text = await handle_remind(update, user_id, parsed, user_now, tz_name)
@@ -145,7 +207,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Удалить событие — «удали встречу с клиентом»\n"
             "• Напоминание — «напомни в 10 утра купить продукты»\n"
             "• Списки — «список покупок: молоко, хлеб, яйца»\n"
-            "• Цвета — «настрой цвета» или /colors\n\n"
+            "• Цвета — «настрой цвета» или /colors\n"
+            "• «Дела» — «записывай дела в календарь» или «в список»\n\n"
             "📌 Команды:\n"
             "/auth — подключить календарь\n"
             "/timezone — сменить часовой пояс\n"
@@ -154,6 +217,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/logout — удалить аккаунт и данные\n\n"
             "Просто пиши как думаешь!"
         )
+        await update.message.reply_text(reply_text)
+
+    elif intent == "set_task_destination":
+        dest = parsed.get("list_name")  # "calendar" или "list"
+        if dest in ("calendar", "list"):
+            await set_task_destination(user_id, dest)
+            label = "📅 Календарь" if dest == "calendar" else "📋 Список"
+            reply_text = f"✅ Запомнила! «Дела» теперь по умолчанию → {label}\n\nИзменить: «записывай дела в список» / «в календарь»"
+        else:
+            reply_text = "Напиши «записывай дела в календарь» или «записывай дела в список»."
+        await update.message.reply_text(reply_text)
+
+    elif intent == "defer":
+        reply_text = parsed.get("reply", "Хорошо! Напиши мне когда будешь готова — всё сделаем 😊")
         await update.message.reply_text(reply_text)
 
     elif intent == "chitchat":

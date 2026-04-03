@@ -80,6 +80,14 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_bulk_delete_confirm(update, user_id, text, pending)
     if action == "move_by_color_confirm":
         return await _handle_move_by_color_confirm(update, user_id, text, pending)
+    if action == "create_duplicate_confirm":
+        return await _handle_create_duplicate_confirm(update, user_id, text, pending)
+    if action == "task_destination_choice":
+        return await _handle_task_destination_choice(update, user_id, text, pending)
+    if action == "reschedule_choice":
+        return await _handle_reschedule_choice(update, user_id, text, pending)
+    if action == "change_color_choice":
+        return await _handle_change_color_choice(update, user_id, text, pending)
     return False
 
 
@@ -212,6 +220,260 @@ async def _handle_delete_list_choice(update: Update, user_id, text: str, pending
     return True
 
 
+# ─── Перенос конкретного события (disambig) ──────────────
+
+async def _handle_reschedule_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор события для переноса из нескольких совпадений."""
+    matches = pending.get("matches", [])
+    target_date = pending.get("target_date")
+    target_time = pending.get("target_time")
+
+    number = extract_number(text)
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if number is None or number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    event = matches[number - 1]
+    clear_pending(user_id)
+
+    from handlers.events import _do_reschedule
+    from handlers.utils import get_user_now
+    from datetime import date as _date
+
+    user_now, tz_name = await get_user_now(user_id)
+    td = datetime.strptime(target_date, "%Y-%m-%d").date() if target_date else user_now.date()
+    r = await _do_reschedule(update, user_id, event, td, target_time, tz_name)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r or "")
+    return True
+
+
+# ─── Смена цвета события (disambig) ─────────────────────
+
+async def _handle_change_color_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор события для смены цвета из нескольких совпадений."""
+    matches = pending.get("matches", [])
+    color_id = pending.get("color_id")
+    number = extract_number(text)
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if number is None or number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    event = matches[number - 1]
+    clear_pending(user_id)
+
+    from services.calendar import patch_event_color
+    from handlers.events import GOOGLE_COLOR_EMOJI, GOOGLE_COLOR_NAME_RU
+
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Событие не привязано к Google Calendar."
+    else:
+        success = await patch_event_color(user_id, external_id, color_id)
+        if success:
+            color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+            color_name = GOOGLE_COLOR_NAME_RU.get(color_id, "")
+            r = f"✅ «{event['title']}» отмечено {color_emoji} {color_name}"
+        else:
+            r = "❌ Не удалось изменить цвет. Попробуй позже."
+
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Выбор места хранения «дел» ──────────────────────────
+
+# Слова, означающие новую команду — не ответ на вопрос
+_ACTION_VERBS = (
+    "запиши", "добавь", "создай", "покажи", "запланируй", "напомни",
+    "удали", "отмени", "перенеси", "сдвинь", "поставь", "забронируй",
+    "отметь", "составь", "расскажи", "что у меня", "что на",
+)
+
+# Слова откладывания
+_DEFER_WORDS = (
+    "потом", "позже", "попозже", "позже скажу", "не сейчас",
+    "позже напишу", "напишу потом", "сделаю позже", "позже выберу",
+)
+
+
+async def _handle_task_destination_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Обрабатывает выбор куда записывать «дела»: в календарь или список."""
+    lower = text.lower().strip()
+    from services.database import set_task_destination
+
+    # Пользователь откладывает — снимаем pending и отпускаем
+    if any(w in lower for w in _DEFER_WORDS):
+        clear_pending(user_id)
+        r = "Хорошо! Напиши когда будешь готова — всё сделаем 😊"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Новая команда (длинный текст с глаголами действий) — снимаем pending,
+    # возвращаем False чтобы router обработал как обычное сообщение
+    if len(text) > 20 or any(v in lower for v in _ACTION_VERBS):
+        clear_pending(user_id)
+        return False
+
+    # Определяем выбор: только короткий ответ "календарь"/"список"/"1"/"2"
+    if any(w in lower for w in ("календарь", "calendar", "1", "в кал", "в гугл")):
+        dest = "calendar"
+    elif any(w in lower for w in ("список", "list", "2", "в список", "в лист")):
+        dest = "list"
+    else:
+        # Непонятный короткий ответ — переспрашиваем
+        r = "Напиши «календарь» или «список» 😊"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    await set_task_destination(user_id, dest)
+    label = "📅 Календарь" if dest == "calendar" else "📋 Список"
+    r_saved = f"✅ Запомнила! «Дела» → {label}\n\nИзменить: «записывай дела в список» / «в календарь»"
+    await update.message.reply_text(r_saved)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r_saved)
+
+    # Выполняем исходный запрос с выбранным назначением
+    parsed = pending.get("parsed", {})
+    clear_pending(user_id)
+    if not parsed:
+        return True
+
+    original_intent = parsed.get("intent")
+    from handlers.utils import get_user_now
+
+    if dest == "calendar":
+        if original_intent in ("create_list", "add_to_list", "create_event"):
+            items = parsed.get("items") or []
+            title = ", ".join(items) if items else (parsed.get("list_name") or parsed.get("title") or "Дела")
+            date_str = parsed.get("date")
+            time_str = parsed.get("time") or "09:00"
+            new_parsed = {**parsed, "intent": "create_event", "title": title, "time": time_str}
+            from handlers.events import handle_create
+            from services.calendar import get_credentials
+            creds = await get_credentials(user_id)
+            if creds:
+                reply_text = await handle_create(update, user_id, new_parsed)
+                await save_message(user_id, "assistant", reply_text or "")
+            else:
+                r = "🔑 Подключи Google Calendar (/auth) чтобы записывать в календарь."
+                await update.message.reply_text(r)
+                await save_message(user_id, "assistant", r)
+        elif original_intent in ("show_list", "show_events"):
+            from handlers.events import handle_show
+            user_now, tz_name = await get_user_now(user_id)
+            reply_text = await handle_show(update, user_id, {**parsed, "intent": "show_events"}, user_now, tz_name)
+            await save_message(user_id, "assistant", reply_text or "")
+    else:
+        if original_intent in ("create_event", "create_list", "add_to_list"):
+            from handlers.lists import handle_create_list
+            user_now, tz_name = await get_user_now(user_id)
+            reply_text = await handle_create_list(update, user_id, {**parsed, "intent": "create_list"}, user_now)
+            await save_message(user_id, "assistant", reply_text or "")
+        elif original_intent in ("show_events", "show_list"):
+            from handlers.lists import handle_show_list
+            reply_text = await handle_show_list(update, user_id, parsed)
+            await save_message(user_id, "assistant", reply_text or "")
+
+    return True
+
+
+# ─── Дедупликация создания событий ──────────────────────
+
+async def _handle_create_duplicate_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Подтверждение создания дублирующего события."""
+    lower = text.lower().strip()
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower not in ("да", "yes", "ага", "давай", "создай", "ок"):
+        return False
+
+    parsed = pending.get("parsed", {})
+    clear_pending(user_id)
+
+    # Повторно вызываем create через events handler, минуя проверку дубликата
+    from services.calendar import create_event
+    from handlers.events import GOOGLE_COLOR_EMOJI
+    from datetime import datetime as _dt
+
+    title = parsed.get("title")
+    date_str = parsed.get("date")
+    time_str = parsed.get("time")
+    end_time_str = parsed.get("end_time")
+    color_id = parsed.get("color_id")
+    if isinstance(color_id, (int, float)):
+        color_id = int(color_id)
+    elif color_id is not None:
+        color_id = None
+
+    try:
+        start_time = _dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        end_time = None
+        if end_time_str:
+            try:
+                end_time = _dt.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+    except Exception:
+        r = "❌ Не смог разобрать дату/время."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    result = await create_event(user_id, title, start_time, end_time, color_id=color_id)
+    if result:
+        start_fmt = start_time.strftime("%d.%m.%Y в %H:%M")
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "") if color_id else ""
+        color_suffix = f"  {color_emoji}" if color_emoji else ""
+        r = f"✅ Создано: **{result['title']}**{color_suffix}\n📅 {start_fmt}\n🔗 {result['link']}"
+        await update.message.reply_text(r, parse_mode="Markdown")
+    else:
+        r = "❌ Не удалось создать событие. Попробуй позже."
+        await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
 # ─── Bulk delete / Move by color ─────────────────────────
 
 async def _handle_bulk_delete_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
@@ -257,6 +519,7 @@ async def _handle_bulk_delete_confirm(update: Update, user_id, text: str, pendin
 async def _handle_move_by_color_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
     """Подтверждение переноса событий по цвету."""
     lower = text.lower().strip()
+
     if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
         clear_pending(user_id)
         r = "👌 Отменено."
@@ -265,17 +528,33 @@ async def _handle_move_by_color_confirm(update: Update, user_id, text: str, pend
         await save_message(user_id, "assistant", r)
         return True
 
-    if lower not in ("да", "yes", "ага", "давай", "перенеси", "ок"):
-        return False
-
     events = pending.get("events", [])
     offset_days = pending.get("offset_days", 0)
     target_label = pending.get("target_label", "")
 
+    # Определяем какие события переносить
+    events_to_move = None
+
+    if lower in ("да", "yes", "ага", "давай", "перенеси", "ок", "все", "всё"):
+        events_to_move = events
+    else:
+        # Проверяем "только одно" / "первое" / "первый" / "одно"
+        _first_words = ("первое", "первый", "первую", "одно", "только одно", "одно из них", "одну")
+        if any(w in lower for w in _first_words):
+            events_to_move = events[:1]
+        else:
+            # Проверяем числовой выбор
+            number = extract_number(text)
+            if number is not None and 1 <= number <= len(events):
+                events_to_move = [events[number - 1]]
+
+    if events_to_move is None:
+        return False
+
     moved = 0
     failed = 0
 
-    for event in events:
+    for event in events_to_move:
         external_id = event.get("external_event_id")
         if not external_id:
             failed += 1
