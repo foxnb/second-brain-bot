@@ -336,6 +336,28 @@ async def patch_event_color(user_id: UUID, external_event_id: str, color_id: int
         return False
 
 
+async def rename_event(user_id: UUID, external_event_id: str, new_title: str) -> bool:
+    """Переименовывает событие в Google Calendar + обновляет в БД."""
+    service = await _get_service(user_id)
+    if not service:
+        return False
+    try:
+        service.events().patch(
+            calendarId="primary",
+            eventId=external_event_id,
+            body={"summary": new_title},
+        ).execute()
+        logger.info(f"Renamed event {external_event_id} → '{new_title}'")
+
+        from services.database import update_event_title
+        await update_event_title(external_event_id, new_title)
+
+        return True
+    except Exception as e:
+        logger.error(f"Rename event error for {external_event_id}: {e}")
+        return False
+
+
 async def revoke_google_token(access_token: str) -> bool:
     """Отзывает Google OAuth токен (GDPR compliance)."""
     try:

@@ -562,6 +562,109 @@ async def handle_change_color(update: Update, user_id, parsed: dict, user_now: d
     return r
 
 
+async def handle_search_event(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Ищет событие по названию и показывает когда оно запланировано."""
+    title_query = (parsed.get("title") or "").lower()
+    if not title_query:
+        r = "🔍 Что искать? Напиши, например: «когда встреча с Аней?»"
+        await update.message.reply_text(r)
+        return r
+
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before search: {e}")
+
+    search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    search_max = search_min + timedelta(days=90)
+    matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+    if not matches:
+        r = f"🔍 Не нашла «{parsed.get('title')}» в ближайшие 90 дней."
+        await update.message.reply_text(r)
+        return r
+
+    tz = ZoneInfo(tz_name)
+    raw_mappings = await get_color_mappings(user_id)
+    mappings_dict = {m["google_color_id"]: m for m in raw_mappings}
+
+    if len(matches) == 1:
+        e = matches[0]
+        start_local = e["start_time"].astimezone(tz)
+        color_id = e.get("color_id")
+        emoji = _get_event_emoji(color_id, mappings_dict)
+        r = f"🔍 {emoji} «{e['title']}» — {start_local.strftime('%d.%m.%Y в %H:%M')}"
+    else:
+        lines = [f"🔍 Нашла {len(matches)} совпадений:\n"]
+        for e in matches:
+            start_local = e["start_time"].astimezone(tz)
+            color_id = e.get("color_id")
+            emoji = _get_event_emoji(color_id, mappings_dict)
+            lines.append(f"{emoji} {start_local.strftime('%d.%m.%Y %H:%M')} — {e['title']}")
+        r = "\n".join(lines)
+
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_edit_event(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Переименовывает событие по названию."""
+    from services.calendar import rename_event
+
+    title_query = (parsed.get("title") or "").lower()
+    new_title = (parsed.get("new_title") or "").strip()
+
+    if not title_query:
+        r = "🤔 Какое событие переименовать? Напиши, например: «переименуй встречу на совещание»"
+        await update.message.reply_text(r)
+        return r
+    if not new_title:
+        r = "🤔 Как назвать? Напиши, например: «переименуй встречу на совещание»"
+        await update.message.reply_text(r)
+        return r
+
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before edit_event: {e}")
+
+    search_min = user_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    search_max = search_min + timedelta(days=90)
+    matches = await find_event_by_title(user_id, title_query, search_min, search_max)
+
+    if not matches:
+        r = f"🔍 Не нашла событие «{parsed.get('title')}» в ближайшие 90 дней."
+        await update.message.reply_text(r)
+        return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = ["Нашла несколько совпадений. Какое переименовать?\n"]
+        for i, e in enumerate(matches, 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        set_pending(user_id, "edit_event_choice", {"matches": matches, "new_title": new_title})
+        r = "\n".join(lines)
+        await update.message.reply_text(r)
+        return r
+
+    event = matches[0]
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Событие не привязано к Google Calendar."
+        await update.message.reply_text(r)
+        return r
+
+    success = await rename_event(user_id, external_id, new_title)
+    if success:
+        r = f"✅ «{event['title']}» → «{new_title}»"
+    else:
+        r = "❌ Не удалось переименовать. Попробуй позже."
+    await update.message.reply_text(r)
+    return r
+
+
 async def handle_delete(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
     """Удаляет событие: ищет в БД, удаляет из Google + мягкое удаление."""
     title_query = (parsed.get("title") or "").lower()

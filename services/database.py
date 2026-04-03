@@ -654,6 +654,19 @@ async def update_event_times(
     return "UPDATE 1" in result
 
 
+async def update_event_title(external_event_id: str, new_title: str) -> bool:
+    """Обновляет название события по external_event_id."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE events SET title = $1, updated_at = now()
+        WHERE external_event_id = $2 AND is_deleted = FALSE
+        """,
+        new_title, external_event_id,
+    )
+    return "UPDATE 1" in result
+
+
 async def cleanup_deleted_events(days: int = 30) -> int:
     """Физически удаляет события, удалённые более N дней назад."""
     pool = await get_pool()
@@ -1001,7 +1014,8 @@ async def get_list_items(
     if include_checked:
         rows = await pool.fetch(
             """
-            SELECT id, content, metadata, is_checked, checked_at, position
+            SELECT id, content, metadata, is_checked, checked_at, position,
+                   COALESCE(status, CASE WHEN is_checked THEN 'done' ELSE 'todo' END) AS status
             FROM list_items
             WHERE list_id = $1 AND is_deleted = FALSE
             ORDER BY is_checked, position
@@ -1011,7 +1025,8 @@ async def get_list_items(
     else:
         rows = await pool.fetch(
             """
-            SELECT id, content, metadata, is_checked, checked_at, position
+            SELECT id, content, metadata, is_checked, checked_at, position,
+                   COALESCE(status, 'todo') AS status
             FROM list_items
             WHERE list_id = $1 AND is_deleted = FALSE AND is_checked = FALSE
             ORDER BY position
@@ -1084,6 +1099,100 @@ async def remove_list_items(
         await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
 
     return removed
+
+
+async def set_list_item_status(list_id: int, item_query: str, status: str) -> str | None:
+    """
+    Устанавливает статус элемента по подстроке.
+    Возвращает название элемента если нашёл, иначе None.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE list_items
+        SET status = $1, updated_at = now()
+        WHERE list_id = $2
+          AND LOWER(content) LIKE '%' || LOWER($3) || '%'
+          AND is_deleted = FALSE
+        RETURNING content
+        """,
+        status, list_id, item_query,
+    )
+    if row:
+        await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
+        return row["content"]
+    return None
+
+
+async def set_list_item_status_across_lists(user_id, item_query: str, status: str) -> list[tuple[str, str]]:
+    """
+    Устанавливает статус по подстроке во всех активных списках пользователя.
+    Возвращает [(list_name, item_content), ...]
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        UPDATE list_items li
+        SET status = $1, updated_at = now()
+        FROM lists l
+        WHERE li.list_id = l.id
+          AND l.user_id = $2
+          AND l.status = 'active'
+          AND LOWER(li.content) LIKE '%' || LOWER($3) || '%'
+          AND li.is_deleted = FALSE
+        RETURNING l.name AS list_name, li.content AS item_content
+        """,
+        status, user_id, item_query,
+    )
+    return [(r["list_name"], r["item_content"]) for r in rows]
+
+
+async def get_list_statuses(list_id: int) -> list[str]:
+    """Возвращает кастомные статусы списка из settings JSONB."""
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT settings FROM lists WHERE id = $1", list_id)
+    if not row or not row["settings"]:
+        return []
+    import json
+    settings = row["settings"] if isinstance(row["settings"], dict) else json.loads(row["settings"])
+    return settings.get("statuses", [])
+
+
+async def save_list_statuses(list_id: int, statuses: list[str]) -> None:
+    """Сохраняет кастомные статусы в settings JSONB списка."""
+    pool = await get_pool()
+    import json
+    await pool.execute(
+        """
+        UPDATE lists
+        SET settings = COALESCE(settings, '{}'::jsonb) || $1::jsonb, updated_at = now()
+        WHERE id = $2
+        """,
+        json.dumps({"statuses": statuses}), list_id,
+    )
+
+
+async def rename_list_item(list_id: int, old_query: str, new_content: str) -> str | None:
+    """
+    Переименовывает элемент списка по подстроке.
+    Возвращает старое название если нашёл, иначе None.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE list_items
+        SET content = $1, updated_at = now()
+        WHERE list_id = $2
+          AND LOWER(content) LIKE '%' || LOWER($3) || '%'
+          AND is_deleted = FALSE
+        RETURNING content
+        """,
+        new_content, list_id, old_query,
+    )
+    if row:
+        await pool.execute("UPDATE lists SET updated_at = now() WHERE id = $1", list_id)
+        return new_content
+    return None
 
 
 async def archive_list(user_id: UUID, list_id: int) -> bool:

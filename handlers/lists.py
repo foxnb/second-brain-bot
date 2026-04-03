@@ -16,6 +16,10 @@ from services.database import (
     get_list_items,
     check_list_items,
     remove_list_items,
+    rename_list_item,
+    set_list_item_status,
+    set_list_item_status_across_lists,
+    get_list_statuses,
     archive_list,
 )
 from handlers.pending import set_pending
@@ -125,13 +129,17 @@ async def handle_show_list(update: Update, user_id, parsed: dict):
     icon = target.get("icon", "📋")
     lines = [f"{icon} {target['name']}:\n"]
     for item in items:
-        mark = ("✅" if item["is_checked"] else "☐") if target["list_type"] == "checklist" else "•"
+        if target["list_type"] == "checklist":
+            status = item.get("status") or ("done" if item["is_checked"] else "todo")
+            mark = _STATUS_EMOJI.get(status, "☐")
+        else:
+            mark = "•"
         lines.append(f"  {mark} {item['content']}")
     if target["list_type"] == "checklist":
         total = len(items)
-        checked = sum(1 for i in items if i["is_checked"])
-        if checked > 0:
-            lines.append(f"\n{checked}/{total} выполнено")
+        done = sum(1 for i in items if (i.get("status") or ("done" if i["is_checked"] else "todo")) == "done")
+        if done > 0:
+            lines.append(f"\n{done}/{total} выполнено")
     r = "\n".join(lines)
     await update.message.reply_text(r)
     return r
@@ -201,6 +209,86 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
     return r
 
 
+async def handle_edit_list_item(update: Update, user_id, parsed: dict):
+    """Переименовывает элемент в списке."""
+    old_item = (parsed.get("old_item") or "").strip()
+    new_item = (parsed.get("new_item") or "").strip()
+    list_name = parsed.get("list_name") or ""
+
+    if not old_item or not new_item:
+        r = "🤔 Напиши, например: «поменяй полить цветы на полить орхидею»"
+        await update.message.reply_text(r)
+        return r
+
+    if list_name:
+        matches = await find_list_by_name(user_id, list_name)
+    else:
+        matches = await get_user_lists(user_id)
+
+    if not matches:
+        r = "📭 Нет активных списков."
+        await update.message.reply_text(r)
+        return r
+
+    for lst in matches:
+        result = await rename_list_item(lst["id"], old_item, new_item)
+        if result:
+            r = f"✅ «{old_item}» → «{new_item}» в списке «{lst['name']}»"
+            await update.message.reply_text(r)
+            return r
+
+    r = f"🔍 Не нашла «{old_item}» в списках."
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_move_list_item(update: Update, user_id, parsed: dict):
+    """Переносит элемент из одного списка в другой."""
+    items = parsed.get("items") or []
+    from_list_name = parsed.get("from_list") or parsed.get("list_name") or ""
+    to_list_name = parsed.get("to_list") or ""
+
+    if not items:
+        r = "🤔 Что перенести? Напиши, например: «перенеси молоко из покупок в продукты»"
+        await update.message.reply_text(r)
+        return r
+    if not from_list_name or not to_list_name:
+        r = "🤔 Укажи оба списка. Например: «перенеси молоко из покупок в продукты»"
+        await update.message.reply_text(r)
+        return r
+
+    from_matches = await find_list_by_name(user_id, from_list_name)
+    if not from_matches:
+        r = f"📭 Список «{from_list_name}» не найден."
+        await update.message.reply_text(r)
+        return r
+
+    to_matches = await find_list_by_name(user_id, to_list_name)
+    if not to_matches:
+        set_pending(user_id, "move_item_create_confirm", {
+            "items": items,
+            "from_list": from_matches[0],
+            "to_list_name": to_list_name,
+        })
+        r = f"📝 Список «{to_list_name}» не найден. Создать и перенести?\n\nНапиши «да» или «нет»."
+        await update.message.reply_text(r)
+        return r
+
+    from_lst = from_matches[0]
+    to_lst = to_matches[0]
+
+    removed = await remove_list_items(from_lst["id"], items)
+    if not removed:
+        r = f"🔍 Не нашла «{', '.join(items)}» в «{from_lst['name']}»."
+        await update.message.reply_text(r)
+        return r
+
+    await add_list_items(to_lst["id"], removed, added_by=user_id)
+    r = f"✅ «{', '.join(removed)}» перенесено из «{from_lst['name']}» в «{to_lst['name']}»"
+    await update.message.reply_text(r)
+    return r
+
+
 async def handle_delete_list(update: Update, user_id, parsed: dict):
     """Удаляет весь список целиком."""
     list_name = parsed.get("list_name") or ""
@@ -228,6 +316,109 @@ async def handle_delete_list(update: Update, user_id, parsed: dict):
         r = "\n".join(lines)
         await update.message.reply_text(r)
         return r
+
+
+_DEFAULT_STATUSES = ["нужно сделать", "в работе", "сделано"]
+
+# Ключевые слова → внутренний статус
+_STATUS_KEYWORDS: list[tuple[list[str], str]] = [
+    (["в работе", "делаю", "взяла", "взял", "начала", "начал", "в процессе"], "in_progress"),
+    (["сделано", "готово", "выполнено", "готова", "сделал", "сделала", "✅", "done"], "done"),
+    (["нужно", "надо", "todo", "не сделано", "отложено"], "todo"),
+]
+
+_STATUS_EMOJI = {"todo": "☐", "in_progress": "▶", "done": "✅"}
+_STATUS_LABEL = {"todo": "нужно сделать", "in_progress": "в работе", "done": "сделано"}
+
+
+def _parse_status(text: str) -> str | None:
+    lower = text.lower()
+    for keywords, status in _STATUS_KEYWORDS:
+        if any(kw in lower for kw in keywords):
+            return status
+    return None
+
+
+async def handle_set_item_status(update: Update, user_id, parsed: dict):
+    """Устанавливает статус элемента списка."""
+    items = parsed.get("items") or []
+    item_query = parsed.get("title") or (items[0] if items else "")
+    status_str = parsed.get("status") or ""
+    list_name = parsed.get("list_name")
+
+    if not item_query:
+        r = "🤔 Что именно? Напиши, например: «полить цветы — в работе»"
+        await update.message.reply_text(r)
+        return r
+
+    status = _parse_status(status_str) or _parse_status(item_query)
+    if not status:
+        r = "🤔 Какой статус? Например: «в работе», «сделано», «нужно сделать»"
+        await update.message.reply_text(r)
+        return r
+
+    if list_name:
+        matches = await find_list_by_name(user_id, list_name)
+        if not matches:
+            r = f"📭 Список «{list_name}» не найден."
+            await update.message.reply_text(r)
+            return r
+        for lst in matches:
+            result = await set_list_item_status(lst["id"], item_query, status)
+            if result:
+                emoji = _STATUS_EMOJI[status]
+                label = _STATUS_LABEL[status]
+                r = f"{emoji} «{result}» — {label}"
+                await update.message.reply_text(r)
+                return r
+        r = f"🔍 Не нашла «{item_query}» в «{list_name}»."
+    else:
+        results = await set_list_item_status_across_lists(user_id, item_query, status)
+        if results:
+            emoji = _STATUS_EMOJI[status]
+            label = _STATUS_LABEL[status]
+            r = f"{emoji} «{results[0][1]}» — {label}"
+        else:
+            r = f"🔍 Не нашла «{item_query}» в активных списках."
+
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_configure_statuses(update: Update, user_id, parsed: dict):
+    """Показывает текущие статусы и предлагает настроить."""
+    list_name = parsed.get("list_name")
+    target_list = None
+
+    if list_name:
+        matches = await find_list_by_name(user_id, list_name)
+        if matches:
+            target_list = matches[0]
+
+    if target_list:
+        custom = await get_list_statuses(target_list["id"])
+        statuses = custom or _DEFAULT_STATUSES
+        list_label = f" для «{target_list['name']}»"
+        list_id = target_list["id"]
+    else:
+        statuses = _DEFAULT_STATUSES
+        list_label = ""
+        list_id = None
+
+    lines = [f"🗂 Текущие статусы дел{list_label}:\n"]
+    emojis = ["☐", "▶", "✅"]
+    for i, s in enumerate(statuses):
+        em = emojis[i] if i < len(emojis) else "•"
+        lines.append(f"  {em} {s}")
+    lines.append(
+        "\nВсё устраивает? Напиши «ок» — или пропиши новые статусы через запятую.\n"
+        "Например: «нужно, срочно, готово»"
+    )
+
+    set_pending(user_id, "configure_statuses", {"list_id": list_id, "list_name": list_name})
+    r = "\n".join(lines)
+    await update.message.reply_text(r)
+    return r
 
 
 async def handle_show_lists(update: Update, user_id):

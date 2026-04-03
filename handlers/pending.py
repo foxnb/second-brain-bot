@@ -88,6 +88,12 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_reschedule_choice(update, user_id, text, pending)
     if action == "change_color_choice":
         return await _handle_change_color_choice(update, user_id, text, pending)
+    if action == "edit_event_choice":
+        return await _handle_edit_event_choice(update, user_id, text, pending)
+    if action == "move_item_create_confirm":
+        return await _handle_move_item_create_confirm(update, user_id, text, pending)
+    if action == "configure_statuses":
+        return await _handle_configure_statuses(update, user_id, text, pending)
     return False
 
 
@@ -302,6 +308,140 @@ async def _handle_change_color_choice(update: Update, user_id, text: str, pendin
             r = f"✅ «{event['title']}» отмечено {color_emoji} {color_name}"
         else:
             r = "❌ Не удалось изменить цвет. Попробуй позже."
+
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Настройка статусов списка ───────────────────────────
+
+async def _handle_configure_statuses(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Сохраняет новые статусы или подтверждает текущие."""
+    lower = text.lower().strip()
+
+    if lower in ("ок", "ok", "всё", "все", "нормально", "хорошо", "оставь", "оставить"):
+        clear_pending(user_id)
+        r = "✅ Статусы оставила как есть."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower in ("отмена", "cancel", "нет"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Парсим новые статусы через запятую
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) < 2:
+        r = "Напиши минимум 2 статуса через запятую. Например: «нужно, срочно, готово»\nИли «ок» чтобы оставить текущие."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    list_id = pending.get("list_id")
+    clear_pending(user_id)
+
+    if list_id:
+        from services.database import save_list_statuses
+        await save_list_statuses(list_id, parts)
+        r = "✅ Статусы обновлены:\n" + "\n".join(f"  • {s}" for s in parts)
+    else:
+        # Без конкретного списка — просто подтверждаем (глобальных статусов нет, хранятся per-list)
+        r = (
+            "✅ Запомнила! Новые статусы:\n" + "\n".join(f"  • {s}" for s in parts) +
+            "\n\nПрименять их к конкретному списку? Напиши: «настрой статусы для покупок»"
+        )
+
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Перенос элемента: создание целевого списка ─────────
+
+async def _handle_move_item_create_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Создаёт целевой список и переносит элементы."""
+    lower = text.lower().strip()
+    if lower in ("нет", "no", "не надо", "отмена", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+    if lower not in ("да", "yes", "ага", "давай", "ок"):
+        return False
+
+    items = pending.get("items", [])
+    from_lst = pending.get("from_list", {})
+    to_list_name = pending.get("to_list_name", "Список")
+    clear_pending(user_id)
+
+    removed = await remove_list_items(from_lst["id"], items)
+    if not removed:
+        r = f"🔍 Не нашла «{', '.join(items)}» в «{from_lst.get('name', '')}»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    new_list_id = await create_list(
+        user_id=user_id, name=to_list_name.capitalize(),
+        list_type=from_lst.get("list_type", "checklist"),
+        icon=from_lst.get("icon", "🛒"),
+    )
+    await add_list_items(new_list_id, removed, added_by=user_id)
+    r = f"✅ Создан список «{to_list_name.capitalize()}» и перенесено: {', '.join(removed)}"
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Переименование события (disambig) ──────────────────
+
+async def _handle_edit_event_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор события для переименования из нескольких совпадений."""
+    matches = pending.get("matches", [])
+    new_title = pending.get("new_title", "")
+    number = extract_number(text)
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if number is None or number < 1 or number > len(matches):
+        r = f"❌ Введи число от 1 до {len(matches)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    event = matches[number - 1]
+    clear_pending(user_id)
+
+    from services.calendar import rename_event
+
+    external_id = event.get("external_event_id")
+    if not external_id:
+        r = "❌ Событие не привязано к Google Calendar."
+    else:
+        success = await rename_event(user_id, external_id, new_title)
+        r = f"✅ «{event['title']}» → «{new_title}»" if success else "❌ Не удалось переименовать. Попробуй позже."
 
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)

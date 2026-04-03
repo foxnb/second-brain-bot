@@ -16,7 +16,7 @@ from services.database import (
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule, handle_change_color
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule, handle_change_color, handle_edit_event, handle_search_event
 from handlers.delete import handle_bulk_delete
 from handlers.reminders import handle_remind
 from handlers.lists import (
@@ -24,6 +24,10 @@ from handlers.lists import (
     handle_add_to_list,
     handle_show_list,
     handle_check_items,
+    handle_edit_list_item,
+    handle_move_list_item,
+    handle_set_item_status,
+    handle_configure_statuses,
     handle_remove_from_list,
     handle_delete_list,
     handle_show_lists,
@@ -129,7 +133,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ─── Роутинг по intent ────────────────────────────────
     reply_text = None
 
-    if intent == "create_event":
+    if intent == "search_event":
+        reply_text = await handle_search_event(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "create_event":
         reply_text = await handle_create(update, user_id, parsed)
 
     elif intent == "show_events":
@@ -143,6 +150,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "move_by_color":
         reply_text = await handle_move_by_color(update, user_id, parsed, user_now, tz_name)
+
+    elif intent == "edit_event":
+        reply_text = await handle_edit_event(update, user_id, parsed, user_now, tz_name)
 
     elif intent == "reschedule_event":
         reply_text = await handle_reschedule(update, user_id, parsed, user_now, tz_name)
@@ -164,6 +174,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif intent == "check_items":
         reply_text = await handle_check_items(update, user_id, parsed)
+
+    elif intent == "set_item_status":
+        reply_text = await handle_set_item_status(update, user_id, parsed)
+
+    elif intent == "configure_statuses":
+        reply_text = await handle_configure_statuses(update, user_id, parsed)
+
+    elif intent == "edit_list_item":
+        reply_text = await handle_edit_list_item(update, user_id, parsed)
+
+    elif intent == "move_list_item":
+        reply_text = await handle_move_list_item(update, user_id, parsed)
 
     elif intent == "remove_from_list":
         reply_text = await handle_remove_from_list(update, user_id, parsed)
