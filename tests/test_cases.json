@@ -1,0 +1,416 @@
+[
+  {
+    "id": "create_event_basic",
+    "input": "встреча завтра в 15:00",
+    "expected": {"intent": "create_event", "time": "15:00", "date": "+1"},
+    "check_fields": ["intent", "time", "date"]
+  },
+  {
+    "id": "create_event_morning_suffix",
+    "input": "созвон в 9 утра",
+    "expected": {"intent": "create_event", "time": "09:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_afternoon_suffix",
+    "input": "обед в 2 дня",
+    "expected": {"intent": "create_event", "time": "14:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_evening_suffix",
+    "input": "ужин в 7 вечера",
+    "expected": {"intent": "create_event", "time": "19:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_night_suffix",
+    "input": "встреча в 2 ночи",
+    "expected": {"intent": "create_event", "time": "02:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_midnight",
+    "input": "встреча в 12 ночи",
+    "expected": {"intent": "create_event", "time": "00:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_noon",
+    "input": "обед в 12",
+    "expected": {"intent": "create_event", "time": "12:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_ambiguous_low",
+    "input": "встреча в 3",
+    "expected": {"intent": "create_event", "time": "15:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_ambiguous_morning_8",
+    "input": "встреча в 8",
+    "expected": {"intent": "create_event", "time": "08:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_ambiguous_morning_11",
+    "input": "встреча в 11",
+    "expected": {"intent": "create_event", "time": "11:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_24h_exact",
+    "input": "встреча в 16:30",
+    "expected": {"intent": "create_event", "time": "16:30"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_next_friday",
+    "input": "созвон в пятницу в 10:00",
+    "expected": {"intent": "create_event", "time": "10:00", "date": "next_friday"},
+    "check_fields": ["intent", "time", "date"]
+  },
+  {
+    "id": "create_event_day_after_tomorrow",
+    "input": "встреча послезавтра в 14:00",
+    "expected": {"intent": "create_event", "time": "14:00", "date": "+2"},
+    "check_fields": ["intent", "time", "date"]
+  },
+  {
+    "id": "create_event_color_red",
+    "input": "встреча завтра в 10 утра, отметь красным",
+    "expected": {"intent": "create_event", "color_id": 11, "time": "10:00", "date": "+1"},
+    "check_fields": ["intent", "color_id", "time", "date"]
+  },
+  {
+    "id": "create_event_color_blue",
+    "input": "созвон в пятницу в 15:00, синим цветом",
+    "expected": {"intent": "create_event", "color_id": 7},
+    "check_fields": ["intent", "color_id"]
+  },
+  {
+    "id": "create_event_color_yellow",
+    "input": "дедлайн в пятницу, выдели жёлтым",
+    "expected": {"intent": "create_event", "color_id": 5},
+    "check_fields": ["intent", "color_id"]
+  },
+  {
+    "id": "create_event_relative_30min",
+    "input": "встреча через 30 минут",
+    "expected": {"intent": "create_event", "time": "__not_null__"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_relative_2h",
+    "input": "созвон через 2 часа",
+    "expected": {"intent": "create_event", "time": "__not_null__"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_event_no_color",
+    "input": "встреча с Иваном завтра в 9 утра",
+    "expected": {"intent": "create_event", "color_id": null},
+    "check_fields": ["intent", "color_id"]
+  },
+  {
+    "id": "show_events_today",
+    "input": "что у меня сегодня",
+    "expected": {"intent": "show_events", "period": "today"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "show_events_tomorrow",
+    "input": "расписание на завтра",
+    "expected": {"intent": "show_events", "period": "tomorrow"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "show_events_week",
+    "input": "планы на неделю",
+    "expected": {"intent": "show_events", "period": "week"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "show_events_today_alt",
+    "input": "что запланировано на сегодня?",
+    "expected": {"intent": "show_events", "period": "today"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "delete_event_by_name",
+    "input": "удали встречу с Аней",
+    "expected": {"intent": "delete_event"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "delete_event_cancel",
+    "input": "отмени обед в среду",
+    "expected": {"intent": "delete_event"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "bulk_delete_today",
+    "input": "удали все события сегодня",
+    "expected": {"intent": "bulk_delete_events", "period": "today"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "bulk_delete_week",
+    "input": "удали всё на этой неделе",
+    "expected": {"intent": "bulk_delete_events", "period": "week"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "bulk_delete_by_color_red",
+    "input": "удали все красные события",
+    "expected": {"intent": "bulk_delete_events", "color_id": 11},
+    "check_fields": ["intent", "color_id"]
+  },
+  {
+    "id": "bulk_delete_by_color_blue",
+    "input": "удали все синие",
+    "expected": {"intent": "bulk_delete_events", "color_id": 7},
+    "check_fields": ["intent", "color_id"]
+  },
+  {
+    "id": "bulk_delete_no_filter_default_today",
+    "input": "удали все мои события",
+    "expected": {"intent": "bulk_delete_events", "period": "today"},
+    "check_fields": ["intent", "period"]
+  },
+  {
+    "id": "move_by_color_blue_tomorrow",
+    "input": "перенеси все синие на завтра",
+    "expected": {"intent": "move_by_color", "color_id": 7, "date": "+1"},
+    "check_fields": ["intent", "color_id", "date"]
+  },
+  {
+    "id": "move_by_color_red_fixed_date",
+    "input": "сдвинь красные на 10 апреля",
+    "expected": {"intent": "move_by_color", "color_id": 11, "date": "2026-04-10"},
+    "check_fields": ["intent", "color_id", "date"]
+  },
+  {
+    "id": "move_by_color_green_friday",
+    "input": "перенеси зелёные на пятницу",
+    "expected": {"intent": "move_by_color", "color_id": 10, "date": "next_friday"},
+    "check_fields": ["intent", "color_id", "date"]
+  },
+  {
+    "id": "remind_fixed_time",
+    "input": "напомни позвонить маме в 18:00",
+    "expected": {"intent": "remind", "time": "18:00"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "remind_tomorrow_morning",
+    "input": "напомни купить молоко завтра в 9 утра",
+    "expected": {"intent": "remind", "time": "09:00", "date": "+1"},
+    "check_fields": ["intent", "time", "date"]
+  },
+  {
+    "id": "remind_relative",
+    "input": "напомни через полчаса",
+    "expected": {"intent": "remind", "time": "__not_null__"},
+    "check_fields": ["intent", "time"]
+  },
+  {
+    "id": "create_list_checklist_items",
+    "input": "список покупок: молоко, хлеб, яйца",
+    "expected": {"intent": "create_list", "list_type": "checklist", "items": ["молоко", "хлеб", "яйца"]},
+    "check_fields": ["intent", "list_type", "items"]
+  },
+  {
+    "id": "create_list_collection",
+    "input": "создай список фильмов",
+    "expected": {"intent": "create_list", "list_type": "collection"},
+    "check_fields": ["intent", "list_type"]
+  },
+  {
+    "id": "create_list_with_date",
+    "input": "список покупок на завтра: сахар, кофе",
+    "expected": {"intent": "create_list", "date": "+1", "items": ["сахар", "кофе"]},
+    "check_fields": ["intent", "date", "items"]
+  },
+  {
+    "id": "create_list_no_date_defaults_today",
+    "input": "список покупок: молоко",
+    "expected": {"intent": "create_list", "date": "+0"},
+    "check_fields": ["intent", "date"]
+  },
+  {
+    "id": "create_list_books",
+    "input": "создай список книг: Дюна, 1984",
+    "expected": {"intent": "create_list", "list_type": "collection", "items": ["Дюна", "1984"]},
+    "check_fields": ["intent", "list_type", "items"]
+  },
+  {
+    "id": "add_to_list_basic",
+    "input": "добавь яблоки в покупки",
+    "expected": {"intent": "add_to_list", "items": ["яблоки"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "add_to_list_collection",
+    "input": "добавь Интерстеллар в список фильмов",
+    "expected": {"intent": "add_to_list", "items": ["Интерстеллар"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "show_list_explicit",
+    "input": "что в списке покупок?",
+    "expected": {"intent": "show_list"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "show_list_implicit",
+    "input": "что купить?",
+    "expected": {"intent": "show_list"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "show_list_movies",
+    "input": "покажи список фильмов",
+    "expected": {"intent": "show_list"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "check_items_verb_female",
+    "input": "взяла молоко",
+    "expected": {"intent": "check_items", "items": ["молоко"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "check_items_plus",
+    "input": "молоко+",
+    "expected": {"intent": "check_items", "items": ["молоко"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "check_items_multiple",
+    "input": "купила молоко и хлеб",
+    "expected": {"intent": "check_items", "items": ["молоко", "хлеб"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "remove_from_list_basic",
+    "input": "удали молоко из покупок",
+    "expected": {"intent": "remove_from_list", "items": ["молоко"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "remove_from_list_verb2",
+    "input": "убери хлеб из списка покупок",
+    "expected": {"intent": "remove_from_list", "items": ["хлеб"]},
+    "check_fields": ["intent", "items"]
+  },
+  {
+    "id": "delete_list_shopping",
+    "input": "удали список покупок",
+    "expected": {"intent": "delete_list"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "delete_list_movies",
+    "input": "удали список фильмов",
+    "expected": {"intent": "delete_list"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "show_lists_possessive",
+    "input": "мои списки",
+    "expected": {"intent": "show_lists"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "show_lists_question",
+    "input": "какие у меня есть списки?",
+    "expected": {"intent": "show_lists"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "setup_colors_command",
+    "input": "настрой цвета",
+    "expected": {"intent": "setup_colors"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "setup_colors_mine",
+    "input": "мои цвета",
+    "expected": {"intent": "setup_colors"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "change_timezone_change",
+    "input": "поменяй часовой пояс",
+    "expected": {"intent": "change_timezone"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "change_timezone_query",
+    "input": "какой у меня часовой пояс?",
+    "expected": {"intent": "change_timezone"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "connect_calendar_google",
+    "input": "подключить гугл календарь",
+    "expected": {"intent": "connect_calendar"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "delete_account_data",
+    "input": "удали мои данные",
+    "expected": {"intent": "delete_account"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "delete_account_logout",
+    "input": "выйти",
+    "expected": {"intent": "delete_account"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "help_capabilities",
+    "input": "что ты умеешь?",
+    "expected": {"intent": "help"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "help_command",
+    "input": "помощь",
+    "expected": {"intent": "help"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "chitchat_hello",
+    "input": "привет",
+    "expected": {"intent": "chitchat"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "chitchat_thanks",
+    "input": "спасибо!",
+    "expected": {"intent": "chitchat"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "chitchat_how_are_you",
+    "input": "как дела?",
+    "expected": {"intent": "chitchat"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "unknown_weather",
+    "input": "какая погода в Москве?",
+    "expected": {"intent": "unknown"},
+    "check_fields": ["intent"]
+  },
+  {
+    "id": "unknown_random",
+    "input": "ля ля ля фа фа фа",
+    "expected": {"intent": "chitchat"},
+    "check_fields": ["intent"]
+  }
+]

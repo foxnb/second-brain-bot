@@ -2,7 +2,7 @@
 
 > Этот файл содержит всё, что нужно чтобы продолжить разработку.
 > Положить в корень репозитория как `CLAUDE.md`.
-> Последнее обновление: 01.04.2026
+> Последнее обновление: 03.04.2026
 
 ---
 
@@ -65,6 +65,9 @@ second-brain-bot/
 │   ├── calendar.py          # Google Calendar OAuth + create/delete/move event (пишут в БД)
 │   ├── database.py          # asyncpg CRUD: users, auth_methods, calendar_connections, events, reminders, lists, color_mappings
 │   └── sync.py              # Ленивая sync Google Calendar → events (syncToken, 410 fallback)
+├── tests/
+│   ├── test_cases.json      # ~65 кейсов для всех интентов; запускать при изменении промпта
+│   └── run_tests.py         # async runner: python tests/run_tests.py [--tz ...] [--filter ...]
 └── revory_db_schema_v9.md   # актуальная схема БД
 ```
 
@@ -192,6 +195,14 @@ Google Calendar colorId (1-11) → color_mappings (label + emoji).
 - [x] `revory_db_schema_v7.md` заменён на v9
 - [x] `httpx` добавлен в requirements.txt
 
+### Системный промпт и тесты — закрыто (03.04.2026)
+- [x] **Оптимизация промпта**: ~30% меньше токенов, таблица времени, дефолт period="today" для bulk_delete без фильтра
+- [x] **Тест-сет**: `tests/test_cases.json` — 65 кейсов по всем интентам (intent, time, date, color_id, items)
+- [x] **Test runner**: `tests/run_tests.py` — async, умный comparator (substring для title, ±1min для relative time, `__not_null__`)
+  - Запуск: `python tests/run_tests.py`
+  - Фильтр: `python tests/run_tests.py --filter create_event`
+  - Workflow: изменил промпт → прогнал тесты → сравнил score
+
 ### Цветовая модель — закрыта
 - [x] SQL миграция: таблица color_mappings + users.colors_asked
 - [x] database.py: color_mappings CRUD + обновлённые upsert_event/get_events_from_db
@@ -224,7 +235,7 @@ Google Calendar colorId (1-11) → color_mappings (label + emoji).
 - [ ] **Composite commands**: "удали X, а Y поменяй на Z" — сейчас бот понимает только один intent за раз
 
 ### Средний горизонт
-- [ ] **PWA**: email+password auth (архитектура готова: users.email, users.password_hash, auth_methods provider='email')
+- [ ] **PWA / Web-версия**: просмотр событий, списков, дел через браузер. Архитектура готова: UUID users, auth_methods provider='email', Supabase напрямую доступна. Нужен: FastAPI слой поверх services/, JWT-auth, React/Next.js фронт. Бизнес-логика уже в services/ — не тащить в handlers.
 - [ ] **Яндекс Календарь**: calendar_connections уже мультипровайдерный
 - [ ] **Subscriptions**: утренний дайджест, вечерний обзор (таблица subscriptions в схеме)
 - [ ] **Categories assignment**: привязка событий к категориям (work, personal, etc.)
