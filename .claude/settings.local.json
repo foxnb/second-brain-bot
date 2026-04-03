@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /c/Users/bear/Documents/second-brain-bot log --oneline -20)",
+      "Bash(find /c/Users/bear/Documents/second-brain-bot -name TODO* -o -name BACKLOG* -o -name *.todo)",
+      "Bash(python3 -c \"import json,sys; cases=json.load\\(sys.stdin\\); print\\(f''''Total: {len\\(cases\\)} cases''''\\); intents=[c[''''expected_intent''''] for c in cases]; from collections import Counter; print\\(Counter\\(intents\\).most_common\\(20\\)\\)\")",
+      "Bash(python -c \"import json; cases=json.load\\(open\\(''tests/test_cases.json''\\)\\); print\\(f''Total: {len\\(cases\\)} cases''\\); from collections import Counter; print\\(Counter\\(c[''expected_intent''] for c in cases\\).most_common\\(25\\)\\)\")",
+      "Bash(python -c \"import json; cases=json.load\\(open\\(''tests/test_cases.json'', encoding=''utf-8''\\)\\); print\\(f''Total: {len\\(cases\\)} cases''\\); from collections import Counter; print\\(Counter\\(c[''expected_intent''] for c in cases\\).most_common\\(25\\)\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python tests/run_tests.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter create_event_color_red)",
+      "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter help_capabilities)"
+    ]
+  }
+}

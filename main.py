@@ -39,6 +39,8 @@ from services.database import (
     disconnect_calendar,
     logout_user,
     get_calendar_tokens_for_revoke,
+    get_grammar_form,
+    set_grammar_form,
 )
 
 load_dotenv()
@@ -295,6 +297,37 @@ async def cmd_deletedata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cmd_logout(update, context)
 
 
+async def cmd_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Настройка грамматического рода для персонализированных ответов."""
+    telegram_id = update.message.from_user.id
+    user_id = await get_internal_user_id(telegram_id)
+    if not user_id:
+        await update.message.reply_text("❌ Нажми /start сначала.")
+        return
+
+    args = context.args
+    if not args:
+        current = await get_grammar_form(user_id)
+        labels = {"m": "мужской", "f": "женский", "n": "нейтральный"}
+        await update.message.reply_text(
+            f"⚙️ Грамматический род: {labels.get(current, current)}\n\n"
+            "Чтобы изменить:\n"
+            "/gender m — мужской (свободен, готов)\n"
+            "/gender f — женский (свободна, готова)\n"
+            "/gender n — нейтральный (по умолчанию)"
+        )
+        return
+
+    form = args[0].lower()
+    if form not in ("m", "f", "n"):
+        await update.message.reply_text("Укажи: /gender m, /gender f или /gender n")
+        return
+
+    await set_grammar_form(user_id, form)
+    labels = {"m": "мужской — «свободен», «готов»", "f": "женский — «свободна», «готова»", "n": "нейтральный"}
+    await update.message.reply_text(f"✅ Установлен {labels[form]}")
+
+
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
     state = request.query_params.get("state")
@@ -416,6 +449,7 @@ def main():
     _telegram_app.add_handler(CommandHandler("disconnect", cmd_disconnect))
     _telegram_app.add_handler(CommandHandler("logout", cmd_logout))
     _telegram_app.add_handler(CommandHandler("deletedata", cmd_deletedata))
+    _telegram_app.add_handler(CommandHandler("gender", cmd_gender))
     _telegram_app.add_handler(CallbackQueryHandler(tz_callback, pattern=r"^tz_"))
     _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper))
 

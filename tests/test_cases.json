@@ -412,5 +412,165 @@
     "input": "ля ля ля фа фа фа",
     "expected": {"intent": "chitchat"},
     "check_fields": ["intent"]
-  }
+  },
+
+  {"id": "edit_event_rename_basic",
+   "input": "переименуй встречу с Аней на созвон с командой",
+   "expected": {"intent": "edit_event", "title": "встреча с Аней", "new_title": "созвон с командой"},
+   "check_fields": ["intent", "title", "new_title"]},
+
+  {"id": "edit_event_rename_garbage",
+   "input": "переименуй вынести мусор на вынести бытовой мусор",
+   "expected": {"intent": "edit_event", "title": "вынести мусор", "new_title": "вынести бытовой мусор"},
+   "check_fields": ["intent", "title", "new_title"]},
+
+  {"id": "edit_event_rename_meeting",
+   "input": "замени название встреча с клиентом на переговоры с партнёром",
+   "expected": {"intent": "edit_event", "title": "встреча с клиентом", "new_title": "переговоры с партнёром"},
+   "check_fields": ["intent", "title", "new_title"]},
+
+  {"id": "search_event_when",
+   "input": "когда встреча с Аней?",
+   "expected": {"intent": "search_event", "title": "встреча с Аней"},
+   "check_fields": ["intent", "title"]},
+
+  {"id": "search_event_when_garbage",
+   "input": "когда надо вынести мусор?",
+   "expected": {"intent": "search_event", "title": "вынести мусор"},
+   "check_fields": ["intent", "title"]},
+
+  {"id": "search_event_scheduled",
+   "input": "на когда запланирован дедлайн?",
+   "expected": {"intent": "search_event", "title": "дедлайн"},
+   "check_fields": ["intent", "title"]},
+
+  {"id": "search_event_dentist",
+   "input": "когда у меня зубной?",
+   "expected": {"intent": "search_event"},
+   "check_fields": ["intent"]},
+
+  {"id": "set_item_status_in_progress",
+   "input": "полить цветы — в работе",
+   "expected": {"intent": "set_item_status", "title": "полить цветы", "status": "в работе"},
+   "check_fields": ["intent", "title", "status"]},
+
+  {"id": "set_item_status_done",
+   "input": "поставь статус сделано для встречи с клиентом",
+   "expected": {"intent": "set_item_status", "title": "встреча с клиентом", "status": "сделано"},
+   "check_fields": ["intent", "title", "status"]},
+
+  {"id": "set_item_status_with_list",
+   "input": "поставь статус в работе для молоко в покупках",
+   "expected": {"intent": "set_item_status", "title": "молоко", "list_name": "покупки"},
+   "check_fields": ["intent", "title", "list_name"]},
+
+  {"id": "edit_list_item_rename",
+   "input": "поменяй полить цветы на полить орхидею",
+   "expected": {"intent": "edit_list_item", "old_item": "полить цветы", "new_item": "полить орхидею"},
+   "check_fields": ["intent", "old_item", "new_item"]},
+
+  {"id": "edit_list_item_rename_alt",
+   "input": "переименуй молоко на молоко 3.2% в покупках",
+   "expected": {"intent": "edit_list_item", "old_item": "молоко", "list_name": "покупки"},
+   "check_fields": ["intent", "old_item", "list_name"]},
+
+  {"id": "move_list_item_basic",
+   "input": "перенеси молоко из покупок в продукты",
+   "expected": {"intent": "move_list_item", "items": ["молоко"], "from_list": "покупки", "to_list": "продукты"},
+   "check_fields": ["intent", "items", "from_list", "to_list"]},
+
+  {"id": "move_list_item_movie",
+   "input": "перемести Дюну из хочу посмотреть в посмотрено",
+   "expected": {"intent": "move_list_item", "items": ["Дюна"], "from_list": "хочу посмотреть", "to_list": "посмотрено"},
+   "check_fields": ["intent", "items", "from_list", "to_list"]},
+
+  {"id": "reschedule_event_to_friday",
+   "input": "перенеси встречу с Аней на пятницу",
+   "expected": {"intent": "reschedule_event", "title": "встреча с Аней", "date": "next_friday"},
+   "check_fields": ["intent", "title", "date"]},
+
+  {"id": "reschedule_event_with_time",
+   "input": "перенеси созвон на завтра в 11",
+   "expected": {"intent": "reschedule_event", "date": "+1", "time": "11:00"},
+   "check_fields": ["intent", "date", "time"]},
+
+  {"id": "change_event_color_red",
+   "input": "отметь встречу с Аней красным",
+   "expected": {"intent": "change_event_color", "title": "встреча с Аней", "color_id": 11},
+   "check_fields": ["intent", "title", "color_id"]},
+
+  {"id": "change_event_color_blue",
+   "input": "покрась дедлайн синим",
+   "expected": {"intent": "change_event_color", "title": "дедлайн", "color_id": 7},
+   "check_fields": ["intent", "title", "color_id"]},
+
+  {"id": "color_lavender",
+   "input": "встреча в 10, цвет лавандовый",
+   "expected": {"intent": "create_event", "color_id": 1},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_sage",
+   "input": "встреча завтра, отметь шалфеем",
+   "expected": {"intent": "create_event", "color_id": 2},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_pink",
+   "input": "встреча в 15:00 розовым",
+   "expected": {"intent": "create_event", "color_id": 4},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_orange",
+   "input": "дедлайн в пятницу оранжевым",
+   "expected": {"intent": "create_event", "color_id": 6},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_graphite",
+   "input": "встреча завтра серым",
+   "expected": {"intent": "create_event", "color_id": 8},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_green",
+   "input": "тренировка в 19:00 зелёным",
+   "expected": {"intent": "create_event", "color_id": 10},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_violet_synonym",
+   "input": "встреча завтра, выдели фиолетовым",
+   "expected": {"intent": "create_event", "color_id": 1},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "color_dark_blue",
+   "input": "созвон в понедельник тёмно-синим",
+   "expected": {"intent": "create_event", "color_id": 9},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "bulk_delete_by_color_green",
+   "input": "удали все зелёные события",
+   "expected": {"intent": "bulk_delete_events", "color_id": 10},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "bulk_delete_by_color_yellow",
+   "input": "убери все жёлтые",
+   "expected": {"intent": "bulk_delete_events", "color_id": 5},
+   "check_fields": ["intent", "color_id"]},
+
+  {"id": "configure_statuses_list",
+   "input": "хочу настроить статусы в покупках",
+   "expected": {"intent": "configure_statuses", "list_name": "покупки"},
+   "check_fields": ["intent", "list_name"]},
+
+  {"id": "configure_statuses_general",
+   "input": "какие у меня статусы дел?",
+   "expected": {"intent": "configure_statuses"},
+   "check_fields": ["intent"]},
+
+  {"id": "defer_later",
+   "input": "потом",
+   "expected": {"intent": "defer"},
+   "check_fields": ["intent"]},
+
+  {"id": "defer_not_now",
+   "input": "не сейчас",
+   "expected": {"intent": "defer"},
+   "check_fields": ["intent"]}
 ]
