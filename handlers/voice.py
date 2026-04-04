@@ -43,8 +43,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         transcription = await _get_groq().audio.transcriptions.create(
             file=buf,
-            model="whisper-large-v3-turbo",
+            model="whisper-large-v3",
             language="ru",
+            prompt="Запись задач, встреч, напоминаний и списков дел. Названия событий, людей, мест.",
         )
         text = transcription.text.strip()
     except Exception as e:
