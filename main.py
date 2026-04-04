@@ -25,6 +25,7 @@ from starlette.routing import Route
 import uvicorn
 
 from handlers.router import handle_text
+from handlers.voice import handle_voice
 from handlers.events import handle_setup_colors
 from services.calendar import start_auth, finish_auth_callback, revoke_google_token
 from services.database import (
@@ -452,6 +453,7 @@ def main():
     _telegram_app.add_handler(CommandHandler("gender", cmd_gender))
     _telegram_app.add_handler(CallbackQueryHandler(tz_callback, pattern=r"^tz_"))
     _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper))
+    _telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     if webhook_url:
         starlette_app = build_starlette_app(_telegram_app)
