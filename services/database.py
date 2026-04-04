@@ -1027,8 +1027,10 @@ async def add_list_items(
     list_id: int,
     items: list[str],
     added_by: UUID = None,
+    url: Optional[str] = None,
 ) -> list[int]:
-    """Добавляет элементы в список. Возвращает список ID."""
+    """Добавляет элементы в список. Возвращает список ID.
+    Если url передан — привязывается к первому элементу."""
     pool = await get_pool()
 
     max_pos = await pool.fetchval(
@@ -1038,13 +1040,14 @@ async def add_list_items(
 
     ids = []
     for i, content in enumerate(items):
+        item_url = url if i == 0 else None
         item_id = await pool.fetchval(
             """
-            INSERT INTO list_items (list_id, added_by, content, position)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO list_items (list_id, added_by, content, position, url)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
             """,
-            list_id, added_by, content, max_pos + i + 1,
+            list_id, added_by, content, max_pos + i + 1, item_url,
         )
         ids.append(item_id)
 
@@ -1063,7 +1066,7 @@ async def get_list_items(
     if include_checked:
         rows = await pool.fetch(
             """
-            SELECT id, content, metadata, is_checked, checked_at, position,
+            SELECT id, content, metadata, is_checked, checked_at, position, url,
                    COALESCE(status, CASE WHEN is_checked THEN 'done' ELSE 'todo' END) AS status
             FROM list_items
             WHERE list_id = $1 AND is_deleted = FALSE
@@ -1074,7 +1077,7 @@ async def get_list_items(
     else:
         rows = await pool.fetch(
             """
-            SELECT id, content, metadata, is_checked, checked_at, position,
+            SELECT id, content, metadata, is_checked, checked_at, position, url,
                    COALESCE(status, 'todo') AS status
             FROM list_items
             WHERE list_id = $1 AND is_deleted = FALSE AND is_checked = FALSE

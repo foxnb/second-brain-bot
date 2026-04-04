@@ -20,6 +20,7 @@ from services.database import (
     set_list_item_status,
     set_list_item_status_across_lists,
     get_list_statuses,
+    get_color_mappings,
     archive_list,
 )
 from handlers.pending import set_pending
@@ -58,8 +59,9 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
         user_id=user_id, name=display_name, list_type=list_type,
         target_date=target_date, auto_archive_at=auto_archive_at, icon=icon,
     )
+    url = parsed.get("url")
     if items:
-        await add_list_items(list_id, items, added_by=user_id)
+        await add_list_items(list_id, items, added_by=user_id, url=url)
     date_label = format_date_label(target_date, user_now)
     item_text = f" ({len(items)} поз.)" if items else ""
     r = f"{icon} \"{display_name}\"{date_label} создан{item_text}"
@@ -104,8 +106,11 @@ async def handle_add_to_list(update: Update, user_id, parsed: dict):
         r = "\n".join(lines)
         await update.message.reply_text(r)
         return r
-    await add_list_items(target["id"], items, added_by=user_id)
+    url = parsed.get("url")
+    await add_list_items(target["id"], items, added_by=user_id, url=url)
     r = f"✅ Добавлено в \"{target['name']}\": {', '.join(items)}"
+    if url:
+        r += f" 🔗"
     await update.message.reply_text(r)
     return r
 
@@ -134,14 +139,18 @@ async def handle_show_list(update: Update, user_id, parsed: dict):
             mark = _STATUS_EMOJI.get(status, "☐")
         else:
             mark = "•"
-        lines.append(f"  {mark} {item['content']}")
+        item_url = item.get("url")
+        if item_url:
+            lines.append(f"  {mark} <a href=\"{item_url}\">{item['content']}</a>")
+        else:
+            lines.append(f"  {mark} {item['content']}")
     if target["list_type"] == "checklist":
         total = len(items)
         done = sum(1 for i in items if (i.get("status") or ("done" if i["is_checked"] else "todo")) == "done")
         if done > 0:
             lines.append(f"\n{done}/{total} выполнено")
     r = "\n".join(lines)
-    await update.message.reply_text(r)
+    await update.message.reply_text(r, parse_mode="HTML")
     return r
 
 
@@ -386,32 +395,61 @@ async def handle_set_item_status(update: Update, user_id, parsed: dict):
 
 
 async def handle_configure_statuses(update: Update, user_id, parsed: dict):
-    """Показывает текущие статусы и предлагает настроить."""
+    """Спрашивает: настраиваем статусы для календаря или списков?"""
+    from handlers.events import GOOGLE_COLOR_NAME_RU, GOOGLE_COLOR_EMOJI
+
     list_name = parsed.get("list_name")
-    target_list = None
 
-    if list_name:
-        matches = await find_list_by_name(user_id, list_name)
-        if matches:
-            target_list = matches[0]
+    # Собираем текущие настройки для обоих разделов
+    color_mappings = await get_color_mappings(user_id)
+    list_statuses = _DEFAULT_STATUSES
 
-    if target_list:
-        custom = await get_list_statuses(target_list["id"])
+    lines = ["⚙️ Давай настроим статусы!\n"]
+
+    # Текущие статусы календаря
+    if color_mappings:
+        lines.append("🗓 Статусы в календаре:")
+        for m in color_mappings:
+            emoji = m.get("emoji") or GOOGLE_COLOR_EMOJI.get(m["google_color_id"], "•")
+            color_name = GOOGLE_COLOR_NAME_RU.get(m["google_color_id"], "")
+            lines.append(f"  {emoji} {color_name} → {m['label']}")
+    else:
+        lines.append("🗓 Статусы в календаре: не настроены")
+
+    lines.append("")
+
+    # Текущие статусы списков
+    lines.append("📋 Статусы в списках:")
+    emojis = ["☐", "▶", "✅"]
+    for i, s in enumerate(list_statuses):
+        em = emojis[i] if i < len(emojis) else "•"
+        lines.append(f"  {em} {s}")
+
+    lines.append("\nДля чего хочешь настроить статусы — для 📅 календаря или 📋 списков?")
+
+    set_pending(user_id, "configure_statuses_choice", {"list_name": list_name})
+    r = "\n".join(lines)
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_configure_list_statuses(update: Update, user_id, list_name=None, list_id=None):
+    """Настройка статусов для конкретного списка."""
+    if list_id:
+        custom = await get_list_statuses(list_id)
         statuses = custom or _DEFAULT_STATUSES
-        list_label = f" для «{target_list['name']}»"
-        list_id = target_list["id"]
+        list_label = f" для «{list_name}»"
     else:
         statuses = _DEFAULT_STATUSES
         list_label = ""
-        list_id = None
 
-    lines = [f"🗂 Текущие статусы дел{list_label}:\n"]
+    lines = [f"📋 Текущие статусы{list_label}:\n"]
     emojis = ["☐", "▶", "✅"]
     for i, s in enumerate(statuses):
         em = emojis[i] if i < len(emojis) else "•"
         lines.append(f"  {em} {s}")
     lines.append(
-        "\nВсё устраивает? Напиши «ок» — или пропиши новые статусы через запятую.\n"
+        "\nНапиши новые статусы через запятую или «ок» если всё устраивает.\n"
         "Например: «нужно, срочно, готово»"
     )
 

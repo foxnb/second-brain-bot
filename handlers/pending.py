@@ -94,6 +94,10 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_move_item_create_confirm(update, user_id, text, pending)
     if action == "configure_statuses":
         return await _handle_configure_statuses(update, user_id, text, pending)
+    if action == "configure_statuses_choice":
+        return await _handle_configure_statuses_choice(update, user_id, text, pending)
+    if action == "set_event_status_choice":
+        return await _handle_set_event_status_choice(update, user_id, text, pending)
     return False
 
 
@@ -935,6 +939,98 @@ async def _handle_color_edit(update: Update, user_id, text: str, pending: dict) 
 
     clear_pending(user_id)
     r = "✅ Цвета обновлены:\n\n" + "\n".join(saved_lines)
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Выбор: настройка статусов — календарь или списки? ───
+
+async def _handle_configure_statuses_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Пользователь выбирает для чего настраивать статусы: календарь или списки."""
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "cancel", "нет", "не надо"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    is_calendar = any(w in lower for w in ("календарь", "calendar", "гугл", "google", "событи", "событий", "встреч"))
+    is_lists = any(w in lower for w in ("список", "списки", "дела", "задачи", "checklist"))
+
+    if is_calendar and not is_lists:
+        clear_pending(user_id)
+        # Переходим к настройке цветов
+        from handlers.events import handle_setup_colors
+        await handle_setup_colors(update, user_id)
+        await save_message(user_id, "user", text)
+        return True
+
+    if is_lists and not is_calendar:
+        list_name = pending.get("list_name")
+        clear_pending(user_id)
+        from handlers.lists import handle_configure_list_statuses
+        from services.database import find_list_by_name
+        list_id = None
+        if list_name:
+            matches = await find_list_by_name(user_id, list_name)
+            if matches:
+                list_id = matches[0]["id"]
+                list_name = matches[0]["name"]
+        await handle_configure_list_statuses(update, user_id, list_name=list_name, list_id=list_id)
+        await save_message(user_id, "user", text)
+        return True
+
+    # Не распознали — просим уточнить
+    r = "Напиши «календарь» или «списки» — для чего настраиваем статусы?"
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+# ─── Выбор события для смены статуса (disambig) ──────────
+
+async def _handle_set_event_status_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Пользователь выбирает событие из нескольких для смены статуса."""
+    from services.calendar import patch_event_color
+    from handlers.events import GOOGLE_COLOR_EMOJI
+
+    matches = pending.get("matches", [])
+    color_id = pending.get("color_id")
+    matched_label = pending.get("matched_label", "")
+    number = extract_number(text)
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if not number or number < 1 or number > len(matches):
+        r = f"Напиши номер от 1 до {len(matches)} или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    event = matches[number - 1]
+    clear_pending(user_id)
+
+    success = await patch_event_color(user_id, event["external_id"], color_id)
+    if success:
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+        r = f"✅ «{event['title']}» → {color_emoji} {matched_label}"
+    else:
+        r = "❌ Не удалось изменить статус. Попробуй позже."
+
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)

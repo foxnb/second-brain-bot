@@ -17,7 +17,7 @@ from services.database import (
 
 from handlers.utils import resolve_user, get_user_now
 from handlers.pending import get_pending, clear_pending, handle_pending
-from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule, handle_change_color, handle_edit_event, handle_search_event
+from handlers.events import handle_create, handle_show, handle_delete, handle_setup_colors, handle_move_by_color, handle_reschedule, handle_change_color, handle_edit_event, handle_search_event, handle_set_event_status
 from handlers.delete import handle_bulk_delete
 from handlers.reminders import handle_remind
 from handlers.lists import (
@@ -71,6 +71,8 @@ async def _dispatch_intent(update: Update, user_id, parsed: dict, user_now, tz_n
         reply_text = await handle_edit_event(update, user_id, parsed, user_now, tz_name)
     elif intent == "reschedule_event":
         reply_text = await handle_reschedule(update, user_id, parsed, user_now, tz_name)
+    elif intent == "set_event_status":
+        reply_text = await handle_set_event_status(update, user_id, parsed, user_now, tz_name)
     elif intent == "change_event_color":
         reply_text = await handle_change_color(update, user_id, parsed, user_now, tz_name)
     elif intent == "remind":

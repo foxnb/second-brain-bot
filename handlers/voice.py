@@ -58,6 +58,4 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info(f"Voice transcribed: {text!r}")
-    await update.message.reply_text(f"🎤 {text}")
-
     await handle_text(update, context, text=text)

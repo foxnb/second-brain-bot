@@ -138,6 +138,15 @@ async def handle_create(update: Update, user_id, parsed: dict):
     elif color_id is not None:
         color_id = None
 
+    # Авто-цвет: если цвет не указан явно — ищем совпадение по label в color_mappings
+    if color_id is None:
+        mappings = await get_color_mappings(user_id)
+        title_lower = title.lower()
+        for m in mappings:
+            if m["label"].lower() in title_lower:
+                color_id = m["google_color_id"]
+                break
+
     # Проверка дубликата: то же название + то же время ±5 минут
     duplicate = await find_duplicate_event(user_id, title, start_time)
     if duplicate:
@@ -603,6 +612,79 @@ async def handle_search_event(update: Update, user_id, parsed: dict, user_now: d
             lines.append(f"{emoji} {start_local.strftime('%d.%m.%Y %H:%M')} — {e['title']}")
         r = "\n".join(lines)
 
+    await update.message.reply_text(r)
+    return r
+
+
+async def handle_set_event_status(update: Update, user_id, parsed: dict, user_now: datetime, tz_name: str):
+    """Меняет статус события через цвет: 'отметь встречу как сделанное'."""
+    from services.calendar import patch_event_color, sync_calendar
+    from services.database import find_event_by_title
+
+    title_query = (parsed.get("title") or "").strip().lower()
+    status_text = (parsed.get("status") or "").strip().lower()
+
+    if not status_text:
+        r = "❓ Укажи статус. Например: «отметь встречу с Аней как сделанное»"
+        await update.message.reply_text(r)
+        return r
+
+    # Ищем colorId по label из color_mappings
+    mappings = await get_color_mappings(user_id)
+    color_id = None
+    matched_label = None
+    for m in mappings:
+        if m["label"].lower() in status_text or status_text in m["label"].lower():
+            color_id = m["google_color_id"]
+            matched_label = m["label"]
+            break
+
+    if not color_id:
+        labels = ", ".join(f"«{m['label']}»" for m in mappings) if mappings else "нет настроенных статусов"
+        r = f"❓ Не знаю что значит «{status_text}».\nДоступные статусы: {labels}\n\nНастрой через /colors"
+        await update.message.reply_text(r)
+        return r
+
+    if not title_query:
+        r = "❓ Укажи название события."
+        await update.message.reply_text(r)
+        return r
+
+    try:
+        await sync_calendar(user_id)
+    except Exception as e:
+        logger.error(f"Sync failed before set_event_status: {e}")
+
+    matches = await find_event_by_title(user_id, title_query)
+    if not matches:
+        r = f"🔍 Не нашла событие «{title_query}»."
+        await update.message.reply_text(r)
+        return r
+
+    if len(matches) > 1:
+        tz = ZoneInfo(tz_name)
+        lines = [f"Нашла {len(matches)} событий — выбери нужное:\n"]
+        for i, e in enumerate(matches[:5], 1):
+            start_local = e["start_time"].astimezone(tz)
+            lines.append(f"{i}. {e['title']} — {start_local.strftime('%d.%m %H:%M')}")
+        lines.append("\nНапиши номер или «отмена».")
+        from handlers.pending import set_pending
+        set_pending(user_id, "set_event_status_choice", {
+            "matches": [{"external_id": e["external_id"], "title": e["title"],
+                         "start_time": e["start_time"].isoformat()} for e in matches[:5]],
+            "color_id": color_id,
+            "matched_label": matched_label,
+        })
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    event = matches[0]
+    success = await patch_event_color(user_id, event["external_id"], color_id)
+    if success:
+        color_emoji = GOOGLE_COLOR_EMOJI.get(color_id, "")
+        r = f"✅ «{event['title']}» → {color_emoji} {matched_label}"
+    else:
+        r = "❌ Не удалось изменить статус. Попробуй позже."
     await update.message.reply_text(r)
     return r
 
