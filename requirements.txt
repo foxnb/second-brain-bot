@@ -8,3 +8,4 @@ asyncpg
 httpx
 starlette
 uvicorn
+cryptography

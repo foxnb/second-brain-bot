@@ -12,8 +12,33 @@ from typing import Optional
 from uuid import UUID
 
 import asyncpg
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
+
+_fernet: Optional["Fernet"] = None
+
+
+def _get_fernet() -> "Fernet":
+    global _fernet
+    if _fernet is None:
+        key = os.environ.get("ENCRYPTION_KEY")
+        if not key:
+            raise RuntimeError("ENCRYPTION_KEY env var is not set")
+        _fernet = Fernet(key.encode())
+    return _fernet
+
+
+def _encrypt(plaintext: str) -> str:
+    return _get_fernet().encrypt(plaintext.encode()).decode()
+
+
+def _decrypt(ciphertext: str) -> str:
+    """Расшифровывает строку. Fallback на plaintext для старых незашифрованных строк."""
+    try:
+        return _get_fernet().decrypt(ciphertext.encode()).decode()
+    except (InvalidToken, Exception):
+        return ciphertext
 
 _pool = None
 
@@ -234,9 +259,9 @@ async def save_calendar_connection(
     """
     pool = await get_pool()
 
-    # TODO: шифровать токены через Fernet (ENCRYPTION_KEY)
-    token_json = json.dumps(token_data)
-    refresh_token = token_data.get("refresh_token")
+    token_json = _encrypt(json.dumps(token_data))
+    raw_refresh = token_data.get("refresh_token")
+    refresh_token = _encrypt(raw_refresh) if raw_refresh else None
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -334,8 +359,8 @@ async def load_calendar_connection(
         "id": row["id"],
         "provider": row["provider"],
         "provider_email": row["provider_email"],
-        "token_data": json.loads(row["access_token_encrypted"]),
-        "refresh_token": row["refresh_token_encrypted"],
+        "token_data": json.loads(_decrypt(row["access_token_encrypted"])),
+        "refresh_token": _decrypt(row["refresh_token_encrypted"]) if row["refresh_token_encrypted"] else None,
         "calendar_id": row["calendar_id"],
         "is_primary": row["is_primary"],
         "sync_token": row["sync_token"],
@@ -366,7 +391,7 @@ async def update_calendar_tokens(connection_id: int, token_data: dict):
         SET access_token_encrypted = $1, updated_at = now()
         WHERE id = $2
         """,
-        json.dumps(token_data),
+        _encrypt(json.dumps(token_data)),
         connection_id,
     )
 
@@ -884,7 +909,7 @@ async def get_calendar_tokens_for_revoke(user_id: UUID) -> list[dict]:
     result = []
     for r in rows:
         try:
-            token_data = json.loads(r["access_token_encrypted"])
+            token_data = json.loads(_decrypt(r["access_token_encrypted"]))
             result.append({"provider": r["provider"], "access_token": token_data.get("token")})
         except Exception:
             pass
