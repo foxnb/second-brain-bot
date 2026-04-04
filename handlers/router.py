@@ -171,9 +171,9 @@ def _is_task_ambiguous(parsed: dict) -> bool:
     return any(kw in candidate for kw in _TASK_KEYWORDS)
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
     """Главный обработчик текстовых сообщений."""
-    text = update.message.text.strip()
+    text = (text or update.message.text).strip()
     telegram_id = update.message.from_user.id
 
     # --- Маппинг telegram_id → UUID ---

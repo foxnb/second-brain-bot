@@ -58,6 +58,4 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Voice transcribed: {text!r}")
 
-    # Подменяем текст сообщения и передаём в основной роутер
-    update.message.text = text
-    await handle_text(update, context)
+    await handle_text(update, context, text=text)
