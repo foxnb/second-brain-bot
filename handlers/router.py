@@ -175,6 +175,13 @@ def _is_task_ambiguous(parsed: dict) -> bool:
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
     """Главный обработчик текстовых сообщений."""
+    # Группы обрабатываются отдельным хендлером
+    chat_type = update.message.chat.type if update.message else "private"
+    if chat_type in ("group", "supergroup"):
+        from handlers.groups import handle_group_message
+        await handle_group_message(update, context, text=text)
+        return
+
     text = (text or update.message.text).strip()
     telegram_id = update.message.from_user.id
 

@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 _pending_actions: dict[str, dict] = {}
 PENDING_TTL_MINUTES = 5
 
+# Telegram IDs пользователей с активным текстовым pending в группе
+# Используется для быстрой фильтрации входящих сообщений без DB-запроса
+_group_text_pending_telegram: set[int] = set()
+
 
 def set_pending(user_id, action: str, data: dict):
     """Сохраняет pending action для пользователя."""
@@ -54,6 +58,23 @@ def get_pending(user_id) -> dict | None:
 def clear_pending(user_id):
     """Удаляет pending action."""
     _pending_actions.pop(str(user_id), None)
+
+
+def set_group_text_pending(user_id, telegram_id: int, action: str, data: dict):
+    """Устанавливает текстовый pending для группового диалога."""
+    set_pending(user_id, action, data)
+    _group_text_pending_telegram.add(telegram_id)
+
+
+def has_group_text_pending(telegram_id: int) -> bool:
+    """Быстрая проверка: есть ли у пользователя активный текстовый pending в группе."""
+    return telegram_id in _group_text_pending_telegram
+
+
+def clear_group_text_pending(user_id, telegram_id: int):
+    """Удаляет групповой текстовый pending."""
+    clear_pending(user_id)
+    _group_text_pending_telegram.discard(telegram_id)
 
 
 # ─── Диспетчер ────────────────────────────────────────────
@@ -98,6 +119,10 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_configure_statuses_choice(update, user_id, text, pending)
     if action == "set_event_status_choice":
         return await _handle_set_event_status_choice(update, user_id, text, pending)
+    if action == "group_new_project_name":
+        return await _handle_group_new_project_name(update, user_id, text, pending)
+    if action == "group_task_reschedule_date":
+        return await _handle_group_task_reschedule_date(update, user_id, text, pending)
     return False
 
 
@@ -1034,4 +1059,78 @@ async def _handle_set_event_status_choice(update: Update, user_id, text: str, pe
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)
+    return True
+
+# ─── Group pending handlers ───────────────────────────────
+
+async def _handle_group_new_project_name(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Пользователь вводит название нового проекта в группе."""
+    from services.database import create_project, create_task
+    from handlers.groups import _ask_task_assignment, _parse_date
+
+    telegram_id = update.message.from_user.id
+    chat_id = pending.get("chat_id")
+    tasks = pending.get("tasks", [])
+    group_id = pending.get("group_id")
+    name = text.strip()
+
+    if not name:
+        await update.message.reply_text("Введи название проекта:")
+        return True
+
+    clear_group_text_pending(user_id, telegram_id)
+
+    project = await create_project(group_id, name)
+
+    created_ids = []
+    for t in tasks:
+        deadline = _parse_date(t.get("deadline"))
+        task = await create_task(project["id"], t["title"], deadline=deadline)
+        created_ids.append(str(task["id"]))
+
+    set_pending(user_id, "group_assign_tasks", {
+        "chat_id": chat_id,
+        "task_ids": created_ids,
+        "task_titles": [t["title"] for t in tasks],
+        "current_index": 0,
+        "project_name": project["name"],
+        "group_id": str(group_id),
+    })
+
+    await _ask_task_assignment(update, None, group_id, tasks[0]["title"], 0, len(created_ids), project["name"])
+    return True
+
+
+async def _handle_group_task_reschedule_date(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Пользователь вводит дату для переноса задачи в группе."""
+    from services.ai import parse_message
+    from handlers.utils import get_user_now
+    from services.database import update_task_deadline
+    from datetime import date as _date
+    from uuid import UUID
+
+    telegram_id = update.message.from_user.id
+    task_id = pending.get("task_id")
+    task_title = pending.get("task_title", "задача")
+
+    clear_group_text_pending(user_id, telegram_id)
+
+    user_now, tz_name = await get_user_now(user_id)
+    parsed = await parse_message(text, user_now=user_now, tz_name=tz_name)
+    date_str = parsed.get("date")
+
+    if not date_str:
+        await update.message.reply_text("Не удалось распознать дату. Попробуй: «20 апреля» или «25.04»")
+        return True
+
+    try:
+        new_date = _date.fromisoformat(date_str)
+    except ValueError:
+        await update.message.reply_text("Не удалось распознать дату.")
+        return True
+
+    await update_task_deadline(UUID(task_id), new_date)
+    await update.message.reply_text(
+        f"📅 Задача «{task_title}» перенесена на {new_date.strftime('%d.%m')}."
+    )
     return True

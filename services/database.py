@@ -1293,3 +1293,253 @@ async def cleanup_archived_lists(days: int = 30) -> int:
     if count > 0:
         logger.info(f"Cleaned up {count} archived lists older than {days} days")
     return count
+
+
+# ─── Groups ───────────────────────────────────────────────
+
+async def ensure_group(telegram_chat_id: int, title: Optional[str] = None) -> dict:
+    """Находит или создаёт группу. Возвращает {id, telegram_chat_id, title}."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, telegram_chat_id, title FROM groups WHERE telegram_chat_id = $1",
+        telegram_chat_id,
+    )
+    if row:
+        if title and row["title"] != title:
+            await pool.execute(
+                "UPDATE groups SET title = $1 WHERE telegram_chat_id = $2",
+                title, telegram_chat_id,
+            )
+        return dict(row)
+    row = await pool.fetchrow(
+        "INSERT INTO groups (telegram_chat_id, title) VALUES ($1, $2) RETURNING id, telegram_chat_id, title",
+        telegram_chat_id, title,
+    )
+    logger.info(f"Created group {telegram_chat_id} ({title})")
+    return dict(row)
+
+
+async def get_group(telegram_chat_id: int) -> Optional[dict]:
+    """Возвращает группу по telegram_chat_id или None."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, telegram_chat_id, title FROM groups WHERE telegram_chat_id = $1",
+        telegram_chat_id,
+    )
+    return dict(row) if row else None
+
+
+async def add_group_member(group_id, user_id, telegram_id: int):
+    """Добавляет участника в группу (идемпотентно)."""
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO group_members (group_id, user_id, telegram_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (group_id, user_id) DO NOTHING
+        """,
+        group_id, user_id, telegram_id,
+    )
+
+
+async def get_group_members(group_id) -> list[dict]:
+    """Возвращает список участников группы с display_name и telegram_id."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT gm.user_id, gm.telegram_id, u.display_name
+        FROM group_members gm
+        JOIN users u ON gm.user_id = u.id
+        WHERE gm.group_id = $1
+        ORDER BY gm.joined_at
+        """,
+        group_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_telegram_id_for_user(user_id) -> Optional[int]:
+    """Возвращает Telegram ID пользователя по UUID."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT provider_user_id FROM auth_methods WHERE user_id = $1 AND provider = 'telegram'",
+        user_id,
+    )
+    return int(row["provider_user_id"]) if row else None
+
+
+# ─── Projects ─────────────────────────────────────────────
+
+async def get_group_projects(group_id) -> list[dict]:
+    """Возвращает проекты группы."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, name FROM projects WHERE group_id = $1 ORDER BY created_at",
+        group_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def create_project(group_id, name: str) -> dict:
+    """Создаёт проект. Возвращает {id, name}."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO projects (group_id, name) VALUES ($1, $2)
+        ON CONFLICT (group_id, name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id, name
+        """,
+        group_id, name,
+    )
+    logger.info(f"Created/found project '{name}' in group {group_id}")
+    return dict(row)
+
+
+async def get_project_by_name(group_id, name: str) -> Optional[dict]:
+    """Ищет проект по имени (case-insensitive)."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, name FROM projects WHERE group_id = $1 AND lower(name) = lower($2)",
+        group_id, name,
+    )
+    return dict(row) if row else None
+
+
+# ─── Tasks ────────────────────────────────────────────────
+
+async def create_task(project_id, title: str, deadline=None, assignee_user_id=None) -> dict:
+    """Создаёт задачу. Возвращает {id, title, deadline, assignee_user_id, status}."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO tasks (project_id, title, deadline, assignee_user_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, title, deadline, assignee_user_id, status
+        """,
+        project_id, title, deadline, assignee_user_id,
+    )
+    return dict(row)
+
+
+async def get_project_tasks(project_id) -> list[dict]:
+    """Возвращает задачи проекта с именем исполнителя."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.title, t.deadline, t.status,
+               u.display_name as assignee_name
+        FROM tasks t
+        LEFT JOIN users u ON t.assignee_user_id = u.id
+        WHERE t.project_id = $1
+        ORDER BY t.deadline NULLS LAST, t.created_at
+        """,
+        project_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def update_task_status(task_id, status: str) -> bool:
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE tasks SET status = $1 WHERE id = $2", status, task_id
+    )
+    return result == "UPDATE 1"
+
+
+async def update_task_assignee(task_id, assignee_user_id) -> bool:
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE tasks SET assignee_user_id = $1 WHERE id = $2", assignee_user_id, task_id
+    )
+    return result == "UPDATE 1"
+
+
+async def update_task_deadline(task_id, deadline) -> bool:
+    pool = await get_pool()
+    result = await pool.execute(
+        """UPDATE tasks SET deadline = $1,
+           reminder_day_before_sent = false,
+           reminder_day_of_sent = false
+           WHERE id = $2""",
+        deadline, task_id,
+    )
+    return result == "UPDATE 1"
+
+
+async def delete_task(task_id) -> bool:
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM tasks WHERE id = $1", task_id)
+    return result == "DELETE 1"
+
+
+async def get_task_by_id(task_id) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT t.id, t.title, t.deadline, t.status, t.assignee_user_id,
+               p.name as project_name, p.group_id,
+               g.telegram_chat_id
+        FROM tasks t
+        JOIN projects p ON t.project_id = p.id
+        JOIN groups g ON p.group_id = g.id
+        WHERE t.id = $1
+        """,
+        task_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_tasks_due_tomorrow() -> list[dict]:
+    """Задачи со сроком завтра, для которых ещё не отправлено напоминание."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.title, t.deadline,
+               p.name as project_name,
+               g.telegram_chat_id,
+               am.provider_user_id as assignee_telegram_id
+        FROM tasks t
+        JOIN projects p ON t.project_id = p.id
+        JOIN groups g ON p.group_id = g.id
+        LEFT JOIN auth_methods am
+               ON t.assignee_user_id = am.user_id AND am.provider = 'telegram'
+        WHERE t.deadline = CURRENT_DATE + INTERVAL '1 day'
+          AND t.status = 'open'
+          AND t.reminder_day_before_sent = false
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_tasks_due_today() -> list[dict]:
+    """Задачи со сроком сегодня, для которых ещё не отправлено утреннее напоминание."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.title, t.deadline,
+               p.name as project_name,
+               g.telegram_chat_id,
+               am.provider_user_id as assignee_telegram_id
+        FROM tasks t
+        JOIN projects p ON t.project_id = p.id
+        JOIN groups g ON p.group_id = g.id
+        LEFT JOIN auth_methods am
+               ON t.assignee_user_id = am.user_id AND am.provider = 'telegram'
+        WHERE t.deadline = CURRENT_DATE
+          AND t.status = 'open'
+          AND t.reminder_day_of_sent = false
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def mark_task_reminder_sent(task_id, day_before: bool = False, day_of: bool = False):
+    pool = await get_pool()
+    if day_before:
+        await pool.execute(
+            "UPDATE tasks SET reminder_day_before_sent = true WHERE id = $1", task_id
+        )
+    if day_of:
+        await pool.execute(
+            "UPDATE tasks SET reminder_day_of_sent = true WHERE id = $1", task_id
+        )

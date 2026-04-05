@@ -15,6 +15,7 @@ from telegram.ext import (
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     filters,
     ContextTypes,
 )
@@ -27,6 +28,7 @@ import uvicorn
 from handlers.router import handle_text
 from handlers.voice import handle_voice
 from handlers.events import handle_setup_colors
+from handlers.groups import handle_bot_joined_group, handle_group_callback
 from services.calendar import start_auth, finish_auth_callback, revoke_google_token
 from services.database import (
     ensure_user,
@@ -38,6 +40,9 @@ from services.database import (
     get_pending_reminders,
     mark_reminder_sent,
     disconnect_calendar,
+    get_tasks_due_tomorrow,
+    get_tasks_due_today,
+    mark_task_reminder_sent,
     logout_user,
     get_calendar_tokens_for_revoke,
     get_grammar_form,
@@ -329,6 +334,29 @@ async def cmd_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Установлен {labels[form]}")
 
 
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Бот добавлен в группу или удалён из неё."""
+    result = update.my_chat_member
+    if not result:
+        return
+    chat = result.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+    new_status = result.new_chat_member.status
+    if new_status in ("member", "administrator"):
+        await handle_bot_joined_group(update, context)
+
+
+async def handle_voice_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Роутер для голосовых: группа → кеш, личка → обработка."""
+    chat_type = update.message.chat.type if update.message else "private"
+    if chat_type in ("group", "supergroup"):
+        from handlers.groups import handle_group_voice
+        await handle_group_voice(update, context)
+    else:
+        await handle_voice(update, context)
+
+
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
     state = request.query_params.get("state")
@@ -416,6 +444,7 @@ async def on_startup(telegram_app: Application):
             while True:
                 await asyncio.sleep(30)
                 try:
+                    # ── Личные напоминания ──
                     reminders = await get_pending_reminders()
                     for r in reminders:
                         try:
@@ -425,6 +454,54 @@ async def on_startup(telegram_app: Application):
                             logger.info(f"Sent reminder {r['id']} to {tid}")
                         except Exception as e:
                             logger.error(f"Failed to send reminder {r['id']}: {e}")
+
+                    # ── Задачи: напоминание за день до срока ──
+                    tasks_tomorrow = await get_tasks_due_tomorrow()
+                    for t in tasks_tomorrow:
+                        try:
+                            chat_id = int(t["telegram_chat_id"])
+                            assignee_mention = ""
+                            if t["assignee_telegram_id"]:
+                                assignee_mention = f" (ответственный: @{t['assignee_telegram_id']})"
+                            await telegram_app.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"⏰ <b>Напоминание!</b>\n"
+                                    f"Завтра срок задачи в проекте «{t['project_name']}»:\n"
+                                    f"📌 {t['title']}{assignee_mention}"
+                                ),
+                                parse_mode="HTML",
+                            )
+                            await mark_task_reminder_sent(t["id"], day_before=True)
+                            logger.info(f"Sent day-before reminder for task {t['id']}")
+                        except Exception as e:
+                            logger.error(f"Failed task day-before reminder {t['id']}: {e}")
+
+                    # ── Задачи: напоминание в день срока ──
+                    from handlers.groups import make_task_reminder_keyboard
+                    tasks_today = await get_tasks_due_today()
+                    for t in tasks_today:
+                        try:
+                            chat_id = int(t["telegram_chat_id"])
+                            assignee_mention = ""
+                            if t["assignee_telegram_id"]:
+                                assignee_mention = f"\nОтветственный: @{t['assignee_telegram_id']}"
+                            await telegram_app.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"🔔 <b>Сегодня срок!</b>\n"
+                                    f"Задача в проекте «{t['project_name']}»:\n"
+                                    f"📌 {t['title']}{assignee_mention}\n\n"
+                                    f"Выполнена?"
+                                ),
+                                parse_mode="HTML",
+                                reply_markup=make_task_reminder_keyboard(t["id"]),
+                            )
+                            await mark_task_reminder_sent(t["id"], day_of=True)
+                            logger.info(f"Sent day-of reminder for task {t['id']}")
+                        except Exception as e:
+                            logger.error(f"Failed task day-of reminder {t['id']}: {e}")
+
                 except Exception as e:
                     logger.error(f"Reminder worker error: {e}")
 
@@ -452,8 +529,13 @@ def main():
     _telegram_app.add_handler(CommandHandler("deletedata", cmd_deletedata))
     _telegram_app.add_handler(CommandHandler("gender", cmd_gender))
     _telegram_app.add_handler(CallbackQueryHandler(tz_callback, pattern=r"^tz_"))
+    _telegram_app.add_handler(CallbackQueryHandler(
+        handle_group_callback,
+        pattern=r"^(gp_|ga:|task_done:|task_rsch:|task_del:)",
+    ))
+    _telegram_app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper))
-    _telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    _telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice_wrapper))
 
     if webhook_url:
         starlette_app = build_starlette_app(_telegram_app)
