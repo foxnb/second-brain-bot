@@ -10,6 +10,7 @@ from telegram import Update
 
 from services.database import (
     create_list,
+    find_duplicate_list,
     find_list_by_name,
     get_user_lists,
     add_list_items,
@@ -22,9 +23,10 @@ from services.database import (
     get_list_statuses,
     get_color_mappings,
     archive_list,
+    update_list_type,
 )
-from handlers.pending import set_pending
-from handlers.utils import format_date_label, make_checklist_name
+from handlers.pending import set_pending, set_lists_context, get_lists_context
+from handlers.utils import extract_number, format_date_label, make_checklist_name
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
     """Создаёт новый список с элементами."""
     base_name = parsed.get("list_name") or parsed.get("title") or "Список"
     list_type = parsed.get("list_type") or "checklist"
+    description = parsed.get("description") or None
     items = parsed.get("items") or []
     date_str = parsed.get("date")
     target_date = None
@@ -55,9 +58,26 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
     else:
         display_name = base_name.capitalize()
     icon = "🛒" if list_type == "checklist" else "📋"
+
+    # Проверка дубликата: список с тем же именем уже существует
+    duplicate = await find_duplicate_list(user_id, display_name)
+    if duplicate:
+        dup_icon = duplicate.get("icon", "📋")
+        r = f"⚠️ Список {dup_icon} \"{duplicate['name']}\" уже существует. Создать ещё один?"
+        await update.message.reply_text(r)
+        set_pending(user_id, "create_list_duplicate_confirm", {
+            "display_name": display_name, "list_type": list_type,
+            "target_date": target_date.isoformat() if target_date else None,
+            "auto_archive_at": auto_archive_at.isoformat() if auto_archive_at else None,
+            "icon": icon, "items": items,
+            "url": parsed.get("url"),
+        })
+        return r
+
     list_id = await create_list(
         user_id=user_id, name=display_name, list_type=list_type,
         target_date=target_date, auto_archive_at=auto_archive_at, icon=icon,
+        description=description,
     )
     url = parsed.get("url")
     if items:
@@ -120,6 +140,9 @@ async def handle_show_list(update: Update, user_id, parsed: dict):
     list_name = parsed.get("list_name") or ""
     if not list_name:
         return await handle_show_lists(update, user_id)
+    resolved = _resolve_list_name_from_context(user_id, list_name)
+    if resolved:
+        list_name = resolved
     matches = await find_list_by_name(user_id, list_name)
     if not matches:
         r = f"📭 Список \"{list_name}\" не найден."
@@ -132,7 +155,10 @@ async def handle_show_list(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
     icon = target.get("icon", "📋")
-    lines = [f"{icon} {target['name']}:\n"]
+    header = f"{icon} {target['name']}"
+    if target.get("description"):
+        header += f"\n<i>{target['description']}</i>"
+    lines = [header + ":\n"]
     for item in items:
         if target["list_type"] == "checklist":
             status = item.get("status") or ("done" if item["is_checked"] else "todo")
@@ -298,6 +324,48 @@ async def handle_move_list_item(update: Update, user_id, parsed: dict):
     return r
 
 
+async def handle_convert_list(update: Update, user_id, parsed: dict):
+    """Конвертирует список из checklist в collection или наоборот."""
+    list_name = parsed.get("list_name") or ""
+    target_type = parsed.get("list_type")  # желаемый тип
+    if not list_name:
+        r = "🤔 Какой список конвертировать?"
+        await update.message.reply_text(r)
+        return r
+    resolved = _resolve_list_name_from_context(user_id, list_name)
+    if resolved:
+        list_name = resolved
+    matches = await find_list_by_name(user_id, list_name)
+    if not matches:
+        r = f"📭 Список \"{list_name}\" не найден."
+        await update.message.reply_text(r)
+        return r
+    target = matches[0]
+    current_type = target["list_type"]
+    if target_type and target_type == current_type:
+        r = f"ℹ️ \"{target['name']}\" уже является {('коллекцией' if current_type == 'collection' else 'чеклистом')}."
+        await update.message.reply_text(r)
+        return r
+    new_type = target_type or ("collection" if current_type == "checklist" else "checklist")
+    new_icon = "📋" if new_type == "collection" else "🛒"
+    await update_list_type(target["id"], new_type, new_icon)
+    type_label = "коллекцию" if new_type == "collection" else "чеклист"
+    r = f"✅ \"{target['name']}\" переведён в {type_label}."
+    await update.message.reply_text(r)
+    return r
+
+
+def _resolve_list_name_from_context(user_id, list_name: str):
+    """Если list_name — порядковое слово/число, возвращает имя из контекста или None."""
+    idx = extract_number(list_name)
+    if idx is None:
+        return None
+    ctx = get_lists_context(user_id)
+    if ctx and 1 <= idx <= len(ctx):
+        return ctx[idx - 1]["name"]
+    return None
+
+
 async def handle_delete_list(update: Update, user_id, parsed: dict):
     """Удаляет весь список целиком."""
     list_name = parsed.get("list_name") or ""
@@ -305,6 +373,9 @@ async def handle_delete_list(update: Update, user_id, parsed: dict):
         r = "🤔 Какой список удалить? Напиши, например: «удали список покупок»"
         await update.message.reply_text(r)
         return r
+    resolved = _resolve_list_name_from_context(user_id, list_name)
+    if resolved:
+        list_name = resolved
     matches = await find_list_by_name(user_id, list_name)
     if not matches:
         r = f"📭 Список \"{list_name}\" не найден."
@@ -466,18 +537,19 @@ async def handle_show_lists(update: Update, user_id):
         r = "📭 У тебя пока нет списков. Напиши, например: «список покупок: молоко, хлеб»"
         await update.message.reply_text(r)
         return r
+    set_lists_context(user_id, lists)
     lines = ["📋 Твои списки:\n"]
-    for lst in lists:
+    for i, lst in enumerate(lists, 1):
         icon = lst.get("icon") or "📋"
         name = lst["name"]
         item_count = lst.get("item_count", 0)
         checked_count = lst.get("checked_count", 0)
         if lst["list_type"] == "checklist" and item_count > 0:
-            lines.append(f"  {icon} {name} — {checked_count}/{item_count} выполнено")
+            lines.append(f"  {i}. {icon} {name} — {checked_count}/{item_count} выполнено")
         elif item_count > 0:
-            lines.append(f"  {icon} {name} — {item_count} элементов")
+            lines.append(f"  {i}. {icon} {name} — {item_count} элементов")
         else:
-            lines.append(f"  {icon} {name}")
+            lines.append(f"  {i}. {icon} {name}")
     r = "\n".join(lines)
     await update.message.reply_text(r)
     return r

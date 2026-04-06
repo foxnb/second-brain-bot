@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 _pending_actions: dict[str, dict] = {}
 PENDING_TTL_MINUTES = 5
 
+# ─── Контекст последних показанных списков ────────────────
+_lists_context: dict[str, list] = {}
+
+
+def set_lists_context(user_id, lists: list) -> None:
+    """Сохраняет последний показанный набор списков для позиционных ссылок."""
+    _lists_context[str(user_id)] = lists
+
+
+def get_lists_context(user_id) -> list | None:
+    return _lists_context.get(str(user_id))
+
 # Telegram IDs пользователей с активным текстовым pending в группе
 # Используется для быстрой фильтрации входящих сообщений без DB-запроса
 _group_text_pending_telegram: set[int] = set()
@@ -103,6 +115,8 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_move_by_color_confirm(update, user_id, text, pending)
     if action == "create_duplicate_confirm":
         return await _handle_create_duplicate_confirm(update, user_id, text, pending)
+    if action == "create_list_duplicate_confirm":
+        return await _handle_create_list_duplicate_confirm(update, user_id, text, pending)
     if action == "task_destination_choice":
         return await _handle_task_destination_choice(update, user_id, text, pending)
     if action == "reschedule_choice":
@@ -190,6 +204,48 @@ async def _handle_create_list_confirm(update: Update, user_id, text: str, pendin
         await save_message(user_id, "assistant", r)
         return True
     return False
+
+
+async def _handle_create_list_duplicate_confirm(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Подтверждение создания списка при уже существующем с тем же именем."""
+    from datetime import date as _date, datetime as _dt
+    lower = text.lower().strip()
+    if lower in ("нет", "no", "не надо", "отмена", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    if lower not in ("да", "yes", "ага", "давай", "создай", "ок"):
+        return False
+
+    display_name = pending["display_name"]
+    list_type = pending["list_type"]
+    items = pending.get("items", [])
+    url = pending.get("url")
+    icon = pending.get("icon", "📋")
+
+    raw_target = pending.get("target_date")
+    target_date = _date.fromisoformat(raw_target) if raw_target else None
+    raw_archive = pending.get("auto_archive_at")
+    auto_archive_at = _dt.fromisoformat(raw_archive) if raw_archive else None
+
+    list_id = await create_list(
+        user_id=user_id, name=display_name, list_type=list_type,
+        target_date=target_date, auto_archive_at=auto_archive_at, icon=icon,
+    )
+    if items:
+        await add_list_items(list_id, items, added_by=user_id, url=url)
+    clear_pending(user_id)
+    r = f"✅ {icon} \"{display_name}\" создан"
+    if items:
+        r += f" ({len(items)} поз.)"
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
 
 
 async def _handle_add_to_list_choice(update: Update, user_id, text: str, pending: dict) -> bool:

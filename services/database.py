@@ -918,6 +918,26 @@ async def get_calendar_tokens_for_revoke(user_id: UUID) -> list[dict]:
 
 # ─── Lists ─────────────────────────────────────────────────
 
+async def find_duplicate_list(user_id: UUID, name: str) -> Optional[dict]:
+    """
+    Ищет активный список с тем же именем (точное, case-insensitive).
+    Используется перед созданием для дедупликации.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, name, list_type, icon
+        FROM lists
+        WHERE user_id = $1
+          AND LOWER(name) = LOWER($2)
+          AND status = 'active'
+        LIMIT 1
+        """,
+        user_id, name,
+    )
+    return dict(row) if row else None
+
+
 async def create_list(
     user_id: UUID,
     name: str,
@@ -926,20 +946,31 @@ async def create_list(
     auto_archive_at=None,
     icon: str = None,
     settings: dict = None,
+    description: str = None,
 ) -> int:
     """Создаёт список. Возвращает list_id."""
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO lists (user_id, name, list_type, target_date, auto_archive_at, icon, settings)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO lists (user_id, name, list_type, target_date, auto_archive_at, icon, settings, description)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id
         """,
         user_id, name, list_type, target_date, auto_archive_at,
-        icon, json.dumps(settings) if settings else None,
+        icon, json.dumps(settings) if settings else None, description,
     )
     logger.info(f"Created list '{name}' (type={list_type}) for user {user_id}, id={row['id']}")
     return row["id"]
+
+
+async def update_list_type(list_id: int, list_type: str, icon: str) -> bool:
+    """Меняет тип списка (checklist ↔ collection)."""
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE lists SET list_type = $1, icon = $2, updated_at = NOW() WHERE id = $3",
+        list_type, icon, list_id,
+    )
+    return result == "UPDATE 1"
 
 
 async def find_list_by_name(
@@ -979,7 +1010,7 @@ async def get_list_by_id(list_id: int) -> Optional[dict]:
     """Загружает список по ID."""
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, user_id, name, list_type, target_date, icon, status FROM lists WHERE id = $1",
+        "SELECT id, user_id, name, list_type, target_date, icon, status, description FROM lists WHERE id = $1",
         list_id,
     )
     return dict(row) if row else None

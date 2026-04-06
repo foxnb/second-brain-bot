@@ -32,6 +32,7 @@ from handlers.lists import (
     handle_remove_from_list,
     handle_delete_list,
     handle_show_lists,
+    handle_convert_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ async def _dispatch_intent(update: Update, user_id, parsed: dict, user_now, tz_n
         reply_text = await handle_remove_from_list(update, user_id, parsed)
     elif intent == "delete_list":
         reply_text = await handle_delete_list(update, user_id, parsed)
+    elif intent == "convert_list":
+        reply_text = await handle_convert_list(update, user_id, parsed)
     elif intent == "show_lists":
         reply_text = await handle_show_lists(update, user_id)
     elif intent == "setup_colors":
