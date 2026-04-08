@@ -1574,3 +1574,106 @@ async def mark_task_reminder_sent(task_id, day_before: bool = False, day_of: boo
         await pool.execute(
             "UPDATE tasks SET reminder_day_of_sent = true WHERE id = $1", task_id
         )
+
+
+# ─── Notes ────────────────────────────────────────────────
+
+async def create_note(
+    user_id: UUID,
+    title: str,
+    content: Optional[str] = None,
+    url: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    attachment_file_id: Optional[str] = None,
+    attachment_file_type: Optional[str] = None,
+) -> int:
+    """Создаёт заметку. Возвращает id."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO notes (user_id, title, content, url, tags, attachment_file_id, attachment_file_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        user_id, title, content, url, tags or [], attachment_file_id, attachment_file_type,
+    )
+    return row["id"]
+
+
+async def get_user_notes(
+    user_id: UUID,
+    tag: Optional[str] = None,
+    limit: int = 15,
+) -> list[dict]:
+    """Возвращает заметки пользователя, опционально фильтруя по тегу."""
+    pool = await get_pool()
+    if tag:
+        rows = await pool.fetch(
+            """
+            SELECT id, title, content, url, attachment_file_id, attachment_file_type, tags, created_at
+            FROM notes
+            WHERE user_id = $1 AND is_deleted = FALSE AND $2 = ANY(tags)
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            user_id, tag, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, title, content, url, attachment_file_id, attachment_file_type, tags, created_at
+            FROM notes
+            WHERE user_id = $1 AND is_deleted = FALSE
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            user_id, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def find_notes_by_query(user_id: UUID, query: str) -> list[dict]:
+    """Ищет заметки по подстроке в title или content."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, title, content, url, attachment_file_id, attachment_file_type, tags, created_at
+        FROM notes
+        WHERE user_id = $1
+          AND is_deleted = FALSE
+          AND (
+              LOWER(title) LIKE '%' || LOWER($2) || '%'
+              OR LOWER(COALESCE(content, '')) LIKE '%' || LOWER($2) || '%'
+          )
+        ORDER BY created_at DESC
+        LIMIT 5
+        """,
+        user_id, query,
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_note(user_id: UUID, note_id: int) -> bool:
+    """Мягкое удаление заметки."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE notes SET is_deleted = TRUE, deleted_at = now()
+        WHERE id = $1 AND user_id = $2 AND is_deleted = FALSE
+        """,
+        note_id, user_id,
+    )
+    return "UPDATE 1" in result
+
+
+async def update_note_attachment(note_id: int, file_id: str, file_type: str) -> bool:
+    """Прикрепляет файл к существующей заметке."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE notes SET attachment_file_id = $1, attachment_file_type = $2, updated_at = now()
+        WHERE id = $3
+        """,
+        file_id, file_type, note_id,
+    )
+    return "UPDATE 1" in result

@@ -10,7 +10,8 @@
       "Bash(python tests/run_tests.py)",
       "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py)",
       "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter create_event_color_red)",
-      "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter help_capabilities)"
+      "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter help_capabilities)",
+      "mcp__filesystem__directory_tree"
     ]
   }
 }

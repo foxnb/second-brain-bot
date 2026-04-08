@@ -86,6 +86,14 @@ SQL миграции — вручную в Supabase SQL Editor
 | remove_from_list | Убрать элемент | items, list_name |
 | delete_list | Удалить список | list_name |
 
+### Заметки
+| Intent | Описание | Ключевые поля |
+|--------|----------|---------------|
+| create_note | Сохранить заметку | title, description, url, tags |
+| show_notes | Показать заметки (все или по тегу) | tags |
+| find_note | Найти конкретную заметку | title (поисковый запрос) |
+| delete_note | Удалить заметку | title |
+
 ### Системные
 | Intent | Описание |
 |--------|----------|
@@ -108,6 +116,7 @@ SQL миграции — вручную в Supabase SQL Editor
 ## Бэклог
 
 ### Ближайшие задачи
+- [ ] **Применить миграцию v16** — выполнить `migrations/v16_notes.sql` в Supabase SQL Editor
 - [ ] **Шифрование токенов** — AES-256-Fernet, ENCRYPTION_KEY env
 - [ ] **grammar_form** — m/f/n для корректных ответов ("свободен"/"свободна")
 - [ ] **Голосовые** — voice → текст → AI парсинг — handlers/voice.py

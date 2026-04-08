@@ -137,6 +137,10 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_group_new_project_name(update, user_id, text, pending)
     if action == "group_task_reschedule_date":
         return await _handle_group_task_reschedule_date(update, user_id, text, pending)
+    if action == "delete_note_choice":
+        return await _handle_delete_note_choice(update, user_id, text, pending)
+    if action == "note_attachment_title":
+        return await _handle_note_attachment_title(update, user_id, text, pending)
     return False
 
 
@@ -1154,6 +1158,66 @@ async def _handle_group_new_project_name(update: Update, user_id, text: str, pen
     })
 
     await _ask_task_assignment(update, None, group_id, tasks[0]["title"], 0, len(created_ids), project["name"])
+    return True
+
+
+async def _handle_delete_note_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор заметки для удаления из нескольких совпадений."""
+    from services.database import delete_note as db_delete_note
+
+    notes = pending.get("notes", [])
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    number = extract_number(text)
+    if number is None or number < 1 or number > len(notes):
+        r = f"❌ Введи число от 1 до {len(notes)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    note = notes[number - 1]
+    clear_pending(user_id)
+    success = await db_delete_note(user_id, note["id"])
+    r = f"🗑️ Заметка «{note['title']}» удалена." if success else "❌ Не удалось удалить."
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+async def _handle_note_attachment_title(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Пользователь вводит название для заметки с прикреплённым файлом."""
+    from services.database import create_note as db_create_note
+
+    title = text.strip()
+    if not title:
+        r = "📎 Введи название заметки:"
+        await update.message.reply_text(r)
+        return True
+
+    file_id = pending.get("file_id")
+    file_type = pending.get("file_type", "document")
+    clear_pending(user_id)
+
+    await db_create_note(
+        user_id, title,
+        attachment_file_id=file_id,
+        attachment_file_type=file_type,
+    )
+    type_word = "фото" if file_type == "photo" else "файл"
+    r = f"📝 Заметка «{title}» сохранена с {type_word}."
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
     return True
 
 

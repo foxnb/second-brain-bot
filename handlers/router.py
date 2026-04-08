@@ -34,6 +34,12 @@ from handlers.lists import (
     handle_show_lists,
     handle_convert_list,
 )
+from handlers.notes import (
+    handle_create_note,
+    handle_show_notes,
+    handle_find_note,
+    handle_delete_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +108,14 @@ async def _dispatch_intent(update: Update, user_id, parsed: dict, user_now, tz_n
         reply_text = await handle_convert_list(update, user_id, parsed)
     elif intent == "show_lists":
         reply_text = await handle_show_lists(update, user_id)
+    elif intent == "create_note":
+        reply_text = await handle_create_note(update, user_id, parsed)
+    elif intent == "show_notes":
+        reply_text = await handle_show_notes(update, user_id, parsed)
+    elif intent == "find_note":
+        reply_text = await handle_find_note(update, user_id, parsed)
+    elif intent == "delete_note":
+        reply_text = await handle_delete_note(update, user_id, parsed)
     elif intent == "setup_colors":
         reply_text = await handle_setup_colors(update, user_id)
     elif intent == "change_timezone":

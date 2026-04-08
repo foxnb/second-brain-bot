@@ -154,7 +154,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🌍 Другой", callback_data="tz_ask_custom")],
         ]
         await update.message.reply_text(
-            "Привет! Я Revory — твой личный календарный ассистент 🗓️\n\n"
+            "Привет! Я Revory — твой ассистент для продуктивности 🗓️\n\n"
+            "Помогу с календарём, списками и заметками.\n\n"
             "Для начала — какой у тебя часовой пояс?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -168,11 +169,15 @@ async def _send_welcome(update_or_query):
         "• «что у меня сегодня?» — показать расписание\n"
         "• «напомни в 10 утра купить продукты» — напоминание\n\n"
         "📋 Списки:\n"
-        "• Чеклист — временный список дел с датой (покупки, задачи)\n"
+        "• Чеклист — временный список с датой (покупки, задачи)\n"
         "  «список покупок: молоко, хлеб» — создать\n"
-        "• Коллекция — постоянный список без даты (фильмы, идеи, места)\n"
+        "• Коллекция — постоянный список (фильмы, идеи, места)\n"
         "  «коллекция фильмов» — создать\n"
-        "• У элементов можно ставить статусы: ☐ нужно / ▶ в работе / ✅ сделано\n\n"
+        "• Статусы элементов: ☐ нужно / ▶ в работе / ✅ сделано\n\n"
+        "📝 Заметки:\n"
+        "• «заметка: Рецепт пасты — смешать фарш с томатами» — сохранить\n"
+        "• «мои заметки» / «заметки #работа» — посмотреть\n"
+        "• Отправь фото или файл — сохранится как заметка\n\n"
         "🎨 Цвета событий — /colors\n"
         "🌐 Часовой пояс — /timezone\n"
         "🔗 Подключить Google Calendar — /auth\n\n"
@@ -363,6 +368,24 @@ async def handle_voice_wrapper(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_voice(update, context)
 
 
+async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фото и документы в личке сохраняются как заметки."""
+    from handlers.notes import handle_photo_or_document
+    from handlers.utils import resolve_user
+
+    chat_type = update.message.chat.type if update.message else "private"
+    if chat_type in ("group", "supergroup"):
+        return  # в группах не обрабатываем
+
+    telegram_id = update.message.from_user.id
+    user_id = await resolve_user(telegram_id)
+    if not user_id:
+        await update.message.reply_text("❌ Нажми /start сначала.")
+        return
+
+    await handle_photo_or_document(update, user_id)
+
+
 async def auth_callback(request: Request):
     code = request.query_params.get("code")
     state = request.query_params.get("state")
@@ -542,6 +565,8 @@ def main():
     _telegram_app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     _telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_wrapper))
     _telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice_wrapper))
+    _telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_media_wrapper))
+    _telegram_app.add_handler(MessageHandler(filters.Document.ALL, handle_media_wrapper))
 
     if webhook_url:
         starlette_app = build_starlette_app(_telegram_app)
