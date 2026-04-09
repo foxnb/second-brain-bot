@@ -89,9 +89,10 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
     if items and len(items) <= 10:
         r += "\n" + "\n".join(f"  ☐ {item}" for item in items)
     sent = await update.message.reply_text(r)
-    # Сохраняем message_id чтобы редактировать список при отметке/удалении позиций
     if list_type == "checklist" and items:
-        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, list_id)
+        list_meta = {"id": list_id, "name": display_name, "icon": icon,
+                     "list_type": list_type, "description": description}
+        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, list_id, list_meta)
     return r
 
 
@@ -158,31 +159,10 @@ async def handle_show_list(update: Update, user_id, parsed: dict):
         r = f"{target.get('icon', '📋')} \"{target['name']}\" — пусто."
         await update.message.reply_text(r)
         return r
-    icon = target.get("icon", "📋")
-    header = f"{icon} {target['name']}"
-    if target.get("description"):
-        header += f"\n<i>{target['description']}</i>"
-    lines = [header + ":\n"]
-    for item in items:
-        if target["list_type"] == "checklist":
-            status = item.get("status") or ("done" if item["is_checked"] else "todo")
-            mark = _STATUS_EMOJI.get(status, "☐")
-        else:
-            mark = "•"
-        item_url = item.get("url")
-        if item_url:
-            lines.append(f"  {mark} <a href=\"{item_url}\">{item['content']}</a>")
-        else:
-            lines.append(f"  {mark} {item['content']}")
-    if target["list_type"] == "checklist":
-        total = len(items)
-        done = sum(1 for i in items if (i.get("status") or ("done" if i["is_checked"] else "todo")) == "done")
-        if done > 0:
-            lines.append(f"\n{done}/{total} выполнено")
-    r = "\n".join(lines)
+    r = _render_list_text(target, items)
     sent = await update.message.reply_text(r, parse_mode="HTML")
     if target["list_type"] == "checklist":
-        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, target["id"])
+        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, target["id"], target)
     return r
 
 
@@ -241,16 +221,15 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
     all_removed = []
-    any_checked = False  # хотя бы одна позиция помечена ✅ (для чеклиста)
+    any_checked = False
     for lst in matches:
         if lst.get("list_type") == "checklist":
-            # Для чеклистов — помечаем как сделанное, чтобы ✅ осталось видным в списке
+            # Помечаем выполненным вместо удаления — позиция остаётся видной с ✅
             checked = await check_list_items(lst["id"], items, checked_by=user_id)
             all_removed.extend(checked)
             if checked:
                 any_checked = True
         else:
-            # Для коллекций — физически удаляем
             removed = await remove_list_items(lst["id"], items)
             all_removed.extend(removed)
     if all_removed:
@@ -430,15 +409,18 @@ _STATUS_EMOJI = {"todo": "☐", "in_progress": "▶", "done": "✅"}
 _STATUS_LABEL = {"todo": "нужно сделать", "in_progress": "в работе", "done": "сделано"}
 
 # Последнее отправленное сообщение со списком per user (in-memory, сбрасывается при рестарте)
-_last_list_msg: dict = {}  # user_id → {msg_id, chat_id, list_id}
+_last_list_msg: dict = {}  # user_id → {msg_id, chat_id, list_id, list_data}
 
 
-def _set_last_list_msg(user_id, msg_id: int, chat_id: int, list_id) -> None:
-    _last_list_msg[user_id] = {"msg_id": msg_id, "chat_id": chat_id, "list_id": list_id}
+def _set_last_list_msg(user_id, msg_id: int, chat_id: int, list_id, list_data: dict) -> None:
+    _last_list_msg[user_id] = {
+        "msg_id": msg_id, "chat_id": chat_id,
+        "list_id": list_id, "list_data": list_data,
+    }
 
 
 def _render_list_text(list_data: dict, items: list) -> str:
-    """Рендерит чеклист в HTML-текст (аналогично handle_show_list)."""
+    """Рендерит список в HTML-текст."""
     icon = list_data.get("icon", "📋")
     header = f"{icon} {list_data['name']}"
     if list_data.get("description"):
@@ -472,7 +454,8 @@ async def _try_edit_last_list(update: Update, user_id) -> None:
     if not last:
         return
     try:
-        list_data = await get_list_by_id(last["list_id"])
+        # Используем закэшированные метаданные списка — не нужен лишний DB-запрос
+        list_data = last["list_data"] or await get_list_by_id(last["list_id"])
         if not list_data:
             return
         items = await get_list_items(last["list_id"])
@@ -516,7 +499,6 @@ async def handle_set_item_status(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
 
-    updated = False
     if list_name:
         matches = await find_list_by_name(user_id, list_name)
         if not matches:
@@ -539,13 +521,12 @@ async def handle_set_item_status(update: Update, user_id, parsed: dict):
             emoji = _STATUS_EMOJI[status]
             label = _STATUS_LABEL[status]
             r = f"{emoji} «{results[0][1]}» — {label}"
-            updated = True
-        else:
-            r = f"🔍 Не нашла «{item_query}» в активных списках."
+            await update.message.reply_text(r)
+            await _try_edit_last_list(update, user_id)
+            return r
+        r = f"🔍 Не нашла «{item_query}» в активных списках."
 
     await update.message.reply_text(r)
-    if updated:
-        await _try_edit_last_list(update, user_id)
     return r
 
 

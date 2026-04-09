@@ -19,6 +19,8 @@ from services.database import (
     save_color_mapping,
     delete_color_mappings,
     get_color_mappings,
+    create_note,
+    delete_note,
 )
 from services.calendar import delete_event, move_event
 from handlers.utils import extract_number
@@ -1163,8 +1165,6 @@ async def _handle_group_new_project_name(update: Update, user_id, text: str, pen
 
 async def _handle_delete_note_choice(update: Update, user_id, text: str, pending: dict) -> bool:
     """Выбор заметки для удаления из нескольких совпадений."""
-    from services.database import delete_note as db_delete_note
-
     notes = pending.get("notes", [])
     lower = text.lower().strip()
 
@@ -1186,7 +1186,7 @@ async def _handle_delete_note_choice(update: Update, user_id, text: str, pending
 
     note = notes[number - 1]
     clear_pending(user_id)
-    success = await db_delete_note(user_id, note["id"])
+    success = await delete_note(user_id, note["id"])
     r = f"🗑️ Заметка «{note['title']}» удалена." if success else "❌ Не удалось удалить."
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
@@ -1196,8 +1196,6 @@ async def _handle_delete_note_choice(update: Update, user_id, text: str, pending
 
 async def _handle_note_attachment_title(update: Update, user_id, text: str, pending: dict) -> bool:
     """Пользователь вводит название для заметки с прикреплённым файлом."""
-    from services.database import create_note as db_create_note
-
     title = text.strip()
     if not title:
         r = "📎 Введи название заметки:"
@@ -1205,15 +1203,19 @@ async def _handle_note_attachment_title(update: Update, user_id, text: str, pend
         return True
 
     file_id = pending.get("file_id")
+    if not file_id:
+        clear_pending(user_id)
+        r = "❌ Файл потерян — попробуй загрузить заново."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
     file_type = pending.get("file_type", "document")
+    type_word = "фото" if file_type == "photo" else "файл"
     clear_pending(user_id)
 
-    await db_create_note(
-        user_id, title,
-        attachment_file_id=file_id,
-        attachment_file_type=file_type,
-    )
-    type_word = "фото" if file_type == "photo" else "файл"
+    await create_note(user_id, title, attachment_file_id=file_id, attachment_file_type=file_type)
     r = f"📝 Заметка «{title}» сохранена с {type_word}."
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)

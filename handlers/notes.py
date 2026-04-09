@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 _ATTACH_LABEL = {"photo": "фото", "document": "файл"}
 
 
+def _format_tags(tags: list[str]) -> str:
+    """#тег1  #тег2"""
+    return "  ".join("#" + t.lstrip("#") for t in tags)
+
+
 async def handle_create_note(update: Update, user_id, parsed: dict):
     """Создаёт заметку из текста."""
     title = (parsed.get("title") or "").strip()
@@ -35,7 +40,7 @@ async def handle_create_note(update: Update, user_id, parsed: dict):
 
     parts = [f"📝 Заметка сохранена: «{title}»"]
     if tags:
-        parts.append("🏷 " + "  ".join("#" + t for t in tags))
+        parts.append("🏷 " + _format_tags(tags))
     r = "\n".join(parts)
     await update.message.reply_text(r)
     return r
@@ -56,7 +61,7 @@ async def handle_show_notes(update: Update, user_id, parsed: dict):
     header = f"📝 Заметки{'  #' + tag if tag else ''}:\n"
     lines = [header]
     for i, note in enumerate(notes, 1):
-        tag_str = "  " + "  ".join("#" + t for t in note["tags"]) if note.get("tags") else ""
+        tag_str = "  " + _format_tags(note["tags"]) if note.get("tags") else ""
         attach = " 📎" if note.get("attachment_file_id") else ""
         lines.append(f"{i}. {note['title']}{tag_str}{attach}")
     r = "\n".join(lines)
@@ -79,18 +84,15 @@ async def handle_find_note(update: Update, user_id, parsed: dict):
         return r
 
     note = notes[0]
-    lines = [f"📝 {note['title']}"]
+    r = f"📝 {note['title']}"
     if note.get("content"):
-        lines.append(f"\n{note['content']}")
+        r += f"\n{note['content']}"
     if note.get("url"):
-        lines.append(f"\n🔗 {note['url']}")
+        r += f"\n🔗 {note['url']}"
     if note.get("attachment_file_type"):
-        label = _ATTACH_LABEL.get(note["attachment_file_type"], "файл")
-        lines.append(f"\n📎 прикреплён {label}")
+        r += f"\n📎 прикреплён {_ATTACH_LABEL.get(note['attachment_file_type'], 'файл')}"
     if note.get("tags"):
-        lines.append("\n" + "  ".join("#" + t for t in note["tags"]))
-
-    r = "".join(lines)
+        r += "\n" + _format_tags(note["tags"])
     await update.message.reply_text(r, parse_mode="HTML")
 
     if note.get("attachment_file_id") and note.get("attachment_file_type"):
@@ -149,6 +151,7 @@ async def handle_photo_or_document(update: Update, user_id):
         return
 
     caption = (msg.caption or "").strip()
+    type_word = "фото" if file_type == "photo" else "файл"
 
     if caption:
         await create_note(
@@ -156,14 +159,10 @@ async def handle_photo_or_document(update: Update, user_id):
             attachment_file_id=file_id,
             attachment_file_type=file_type,
         )
-        type_word = "фото" if file_type == "photo" else "файл"
-        r = f"📝 Заметка «{caption}» сохранена с {type_word}."
-        await msg.reply_text(r)
+        await msg.reply_text(f"📝 Заметка «{caption}» сохранена с {type_word}.")
     else:
         set_pending(user_id, "note_attachment_title", {
             "file_id": file_id,
             "file_type": file_type,
         })
-        type_word = "Фото" if file_type == "photo" else "Файл"
-        r = f"📎 {type_word} получен! Как назвать заметку?"
-        await msg.reply_text(r)
+        await msg.reply_text(f"📎 {type_word.capitalize()} получен! Как назвать заметку?")

@@ -1666,14 +1666,3 @@ async def delete_note(user_id: UUID, note_id: int) -> bool:
     return "UPDATE 1" in result
 
 
-async def update_note_attachment(note_id: int, file_id: str, file_type: str) -> bool:
-    """Прикрепляет файл к существующей заметке."""
-    pool = await get_pool()
-    result = await pool.execute(
-        """
-        UPDATE notes SET attachment_file_id = $1, attachment_file_type = $2, updated_at = now()
-        WHERE id = $3
-        """,
-        file_id, file_type, note_id,
-    )
-    return "UPDATE 1" in result

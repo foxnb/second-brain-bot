@@ -18,3 +18,8 @@ CREATE TABLE IF NOT EXISTS notes (
 
 CREATE INDEX IF NOT EXISTS idx_notes_user_active ON notes(user_id) WHERE is_deleted = FALSE;
 CREATE INDEX IF NOT EXISTS idx_notes_tags ON notes USING GIN(tags) WHERE is_deleted = FALSE;
+
+-- Trigram-индекс для полнотекстового поиска по title и content (find_notes_by_query)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_notes_title_trgm ON notes USING GIN(LOWER(title) gin_trgm_ops) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_notes_content_trgm ON notes USING GIN(LOWER(content) gin_trgm_ops) WHERE is_deleted = FALSE;
