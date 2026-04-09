@@ -182,6 +182,14 @@ async def handle_check_items(update: Update, user_id, parsed: dict):
         r = "📭 Нет активных списков."
         await update.message.reply_text(r)
         return r
+
+    # Сначала ищем в последнем показанном списке — чтобы не промахнуться мимо нужного
+    last = _last_list_msg.get(user_id)
+    if last and not list_name:
+        priority = [lst for lst in matches if lst["id"] == last["list_id"]]
+        rest = [lst for lst in matches if lst["id"] != last["list_id"]]
+        matches = priority + rest
+
     all_checked = []
     found_list_id = None
     for lst in matches:
@@ -223,6 +231,14 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
         r = "📭 Нет активных списков."
         await update.message.reply_text(r)
         return r
+
+    # Сначала ищем в последнем показанном списке
+    last = _last_list_msg.get(user_id)
+    if last and not list_name:
+        priority = [lst for lst in matches if lst["id"] == last["list_id"]]
+        rest = [lst for lst in matches if lst["id"] != last["list_id"]]
+        matches = priority + rest
+
     all_removed = []
     found_list_id = None
     for lst in matches:
@@ -471,7 +487,7 @@ async def _try_edit_last_list(update: Update, user_id, list_id: int = None) -> N
                 )
                 return
             except Exception as e:
-                logger.debug(f"_try_edit_last_list edit failed: {e}")
+                logger.warning(f"_try_edit_last_list edit failed: {e}")
         # Fallback: сохранённого сообщения нет или оно устарело — отправляем новое
         sent = await update.message.reply_text(new_text, parse_mode="HTML")
         _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, the_list_id, list_data)
