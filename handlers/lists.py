@@ -444,7 +444,10 @@ def _render_list_text(list_data: dict, items: list) -> str:
     lines = [header + ":\n"]
     for item in items:
         if list_data["list_type"] == "checklist":
-            status = item.get("status") or ("done" if item["is_checked"] else "todo")
+            if item.get("is_checked"):
+                status = "done"
+            else:
+                status = item.get("status") or "todo"
             mark = _STATUS_EMOJI.get(status, "☐")
         else:
             mark = "•"
@@ -455,10 +458,7 @@ def _render_list_text(list_data: dict, items: list) -> str:
             lines.append(f"  {mark} {item['content']}")
     if list_data["list_type"] == "checklist":
         total = len(items)
-        done = sum(
-            1 for i in items
-            if (i.get("status") or ("done" if i["is_checked"] else "todo")) == "done"
-        )
+        done = sum(1 for i in items if i.get("is_checked"))
         if done > 0:
             lines.append(f"\n{done}/{total} выполнено")
     return "\n".join(lines)
