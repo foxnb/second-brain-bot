@@ -211,7 +211,8 @@ async def handle_check_items(update: Update, user_id, parsed: dict):
         r = f"🔍 Не нашла \"{', '.join(items)}\" в активных списках."
     await update.message.reply_text(r)
     if all_checked:
-        await _try_edit_last_list(update, user_id, list_id=found_list_id)
+        checked_names = [c[1] for c in all_checked]
+        await _try_edit_last_list(update, user_id, list_id=found_list_id, just_checked=checked_names)
     return r
 
 
@@ -463,8 +464,18 @@ def _render_list_text(list_data: dict, items: list) -> str:
     return "\n".join(lines)
 
 
-async def _try_edit_last_list(update: Update, user_id, list_id: int = None) -> None:
-    """Обновляет последнее сообщение со списком или отправляет новое, если нет сохранённого."""
+async def _try_edit_last_list(
+    update: Update,
+    user_id,
+    list_id: int = None,
+    just_checked: list[str] = None,
+) -> None:
+    """Обновляет последнее сообщение со списком или отправляет новое, если нет сохранённого.
+
+    just_checked — имена элементов, только что отмеченных выполненными.
+    Передаются явно, чтобы правильно отрендерить список даже если DB-чтение
+    вернуло устаревшее состояние (PgBouncer pooling lag).
+    """
     last = _last_list_msg.get(user_id)
     the_list_id = (last["list_id"] if last else None) or list_id
     if not the_list_id:
@@ -476,8 +487,23 @@ async def _try_edit_last_list(update: Update, user_id, list_id: int = None) -> N
         items = await get_list_items(the_list_id)
         if not items:
             return
+
+        # Принудительно отмечаем только что выполненные элементы.
+        # Защита от случаев когда пул соединений возвращает устаревшее чтение
+        # после свежего UPDATE (PgBouncer в transaction-mode pooling).
+        if just_checked:
+            checked_lower = {n.lower() for n in just_checked}
+            for item in items:
+                if item["content"].lower() in checked_lower:
+                    item["is_checked"] = True
+                    item["status"] = "done"
+            items.sort(key=lambda i: (i.get("is_checked") or False, i.get("position") or 0))
+
         checked_count = sum(1 for i in items if i.get("is_checked"))
-        logger.info(f"_try_edit_last_list: list_id={the_list_id} items={len(items)} checked={checked_count} has_last={last is not None}")
+        logger.info(
+            f"_try_edit_last_list: list_id={the_list_id} items={len(items)} "
+            f"checked={checked_count} has_last={last is not None}"
+        )
         new_text = _render_list_text(list_data, items)
         if last:
             try:
