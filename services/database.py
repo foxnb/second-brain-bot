@@ -1098,7 +1098,7 @@ async def get_list_items(
         rows = await pool.fetch(
             """
             SELECT id, content, metadata, is_checked, checked_at, position, url,
-                   COALESCE(status, CASE WHEN is_checked THEN 'done' ELSE 'todo' END) AS status
+                   CASE WHEN is_checked THEN 'done' ELSE COALESCE(status, 'todo') END AS status
             FROM list_items
             WHERE list_id = $1 AND is_deleted = FALSE
             ORDER BY is_checked, position
@@ -1135,7 +1135,7 @@ async def check_list_items(
         row = await pool.fetchrow(
             """
             UPDATE list_items
-            SET is_checked = TRUE, checked_at = now(), checked_by = $3
+            SET is_checked = TRUE, status = 'done', checked_at = now(), checked_by = $3
             WHERE list_id = $1
               AND LOWER(content) LIKE '%' || LOWER($2) || '%'
               AND is_checked = FALSE AND is_deleted = FALSE
