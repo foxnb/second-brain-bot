@@ -88,7 +88,10 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
     r = f"{icon} \"{display_name}\"{date_label} создан{item_text}"
     if items and len(items) <= 10:
         r += "\n" + "\n".join(f"  ☐ {item}" for item in items)
-    await update.message.reply_text(r)
+    sent = await update.message.reply_text(r)
+    # Сохраняем message_id чтобы редактировать список при отметке/удалении позиций
+    if list_type == "checklist" and items:
+        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, list_id)
     return r
 
 
@@ -238,11 +241,20 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
     all_removed = []
+    any_checked = False  # хотя бы одна позиция помечена ✅ (для чеклиста)
     for lst in matches:
-        removed = await remove_list_items(lst["id"], items)
-        all_removed.extend(removed)
+        if lst.get("list_type") == "checklist":
+            # Для чеклистов — помечаем как сделанное, чтобы ✅ осталось видным в списке
+            checked = await check_list_items(lst["id"], items, checked_by=user_id)
+            all_removed.extend(checked)
+            if checked:
+                any_checked = True
+        else:
+            # Для коллекций — физически удаляем
+            removed = await remove_list_items(lst["id"], items)
+            all_removed.extend(removed)
     if all_removed:
-        r = f"🗑 Убрано: {', '.join(all_removed)}"
+        r = f"✅ Готово: {', '.join(all_removed)}" if any_checked else f"🗑 Убрано: {', '.join(all_removed)}"
     else:
         r = f"🔍 Не нашла \"{', '.join(items)}\" в списках."
     await update.message.reply_text(r)
