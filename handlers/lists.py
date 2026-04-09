@@ -183,10 +183,13 @@ async def handle_check_items(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
     all_checked = []
+    found_list_id = None
     for lst in matches:
         checked = await check_list_items(lst["id"], items, checked_by=user_id)
         for c in checked:
             all_checked.append((lst["name"], c))
+            if not found_list_id:
+                found_list_id = lst["id"]
     if all_checked:
         names = ", ".join(c[1] for c in all_checked)
         r = f"✅ Готово: {names}"
@@ -200,16 +203,16 @@ async def handle_check_items(update: Update, user_id, parsed: dict):
         r = f"🔍 Не нашла \"{', '.join(items)}\" в активных списках."
     await update.message.reply_text(r)
     if all_checked:
-        await _try_edit_last_list(update, user_id)
+        await _try_edit_last_list(update, user_id, list_id=found_list_id)
     return r
 
 
 async def handle_remove_from_list(update: Update, user_id, parsed: dict):
-    """Удаляет элементы из списка."""
+    """Физически удаляет элементы из списка."""
     items = parsed.get("items") or []
     list_name = parsed.get("list_name")
     if not items:
-        r = "🤔 Что убрать? Напиши, например: «удали молоко из покупок»"
+        r = "🤔 Что удалить? Напиши, например: «удали молоко из покупок»"
         await update.message.reply_text(r)
         return r
     if list_name:
@@ -221,24 +224,20 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
         await update.message.reply_text(r)
         return r
     all_removed = []
-    any_checked = False
+    found_list_id = None
     for lst in matches:
-        if lst.get("list_type") == "checklist":
-            # Помечаем выполненным вместо удаления — позиция остаётся видной с ✅
-            checked = await check_list_items(lst["id"], items, checked_by=user_id)
-            all_removed.extend(checked)
-            if checked:
-                any_checked = True
-        else:
-            removed = await remove_list_items(lst["id"], items)
+        removed = await remove_list_items(lst["id"], items)
+        if removed:
             all_removed.extend(removed)
+            if not found_list_id:
+                found_list_id = lst["id"]
     if all_removed:
-        r = f"✅ Готово: {', '.join(all_removed)}" if any_checked else f"🗑 Убрано: {', '.join(all_removed)}"
+        r = f"🗑 Убрано: {', '.join(all_removed)}"
     else:
         r = f"🔍 Не нашла \"{', '.join(items)}\" в списках."
     await update.message.reply_text(r)
     if all_removed:
-        await _try_edit_last_list(update, user_id)
+        await _try_edit_last_list(update, user_id, list_id=found_list_id)
     return r
 
 
@@ -448,29 +447,36 @@ def _render_list_text(list_data: dict, items: list) -> str:
     return "\n".join(lines)
 
 
-async def _try_edit_last_list(update: Update, user_id) -> None:
-    """Если есть сохранённое сообщение со списком — обновляет его текущим состоянием."""
+async def _try_edit_last_list(update: Update, user_id, list_id: int = None) -> None:
+    """Обновляет последнее сообщение со списком или отправляет новое, если нет сохранённого."""
     last = _last_list_msg.get(user_id)
-    if not last:
+    the_list_id = (last["list_id"] if last else None) or list_id
+    if not the_list_id:
         return
     try:
-        # Используем закэшированные метаданные списка — не нужен лишний DB-запрос
-        list_data = last["list_data"] or await get_list_by_id(last["list_id"])
+        list_data = (last.get("list_data") if last else None) or await get_list_by_id(the_list_id)
         if not list_data:
             return
-        items = await get_list_items(last["list_id"])
+        items = await get_list_items(the_list_id)
         if not items:
             return
         new_text = _render_list_text(list_data, items)
-        await update.get_bot().edit_message_text(
-            chat_id=last["chat_id"],
-            message_id=last["msg_id"],
-            text=new_text,
-            parse_mode="HTML",
-        )
+        if last:
+            try:
+                await update.get_bot().edit_message_text(
+                    chat_id=last["chat_id"],
+                    message_id=last["msg_id"],
+                    text=new_text,
+                    parse_mode="HTML",
+                )
+                return
+            except Exception as e:
+                logger.debug(f"_try_edit_last_list edit failed: {e}")
+        # Fallback: сохранённого сообщения нет или оно устарело — отправляем новое
+        sent = await update.message.reply_text(new_text, parse_mode="HTML")
+        _set_last_list_msg(user_id, sent.message_id, update.message.chat_id, the_list_id, list_data)
     except Exception as e:
-        # "Message is not modified" или сообщение старше 48ч — игнорируем
-        logger.debug(f"_try_edit_last_list: {e}")
+        logger.warning(f"_try_edit_last_list error: {e}")
 
 
 def _parse_status(text: str) -> str | None:
@@ -512,7 +518,7 @@ async def handle_set_item_status(update: Update, user_id, parsed: dict):
                 label = _STATUS_LABEL[status]
                 r = f"{emoji} «{result}» — {label}"
                 await update.message.reply_text(r)
-                await _try_edit_last_list(update, user_id)
+                await _try_edit_last_list(update, user_id, list_id=lst["id"])
                 return r
         r = f"🔍 Не нашла «{item_query}» в «{list_name}»."
     else:
