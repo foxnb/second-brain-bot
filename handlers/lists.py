@@ -476,6 +476,8 @@ async def _try_edit_last_list(update: Update, user_id, list_id: int = None) -> N
         items = await get_list_items(the_list_id)
         if not items:
             return
+        checked_count = sum(1 for i in items if i.get("is_checked"))
+        logger.info(f"_try_edit_last_list: list_id={the_list_id} items={len(items)} checked={checked_count} has_last={last is not None}")
         new_text = _render_list_text(list_data, items)
         if last:
             try:
