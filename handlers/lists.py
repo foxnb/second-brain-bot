@@ -246,6 +246,8 @@ async def handle_remove_from_list(update: Update, user_id, parsed: dict):
     else:
         r = f"🔍 Не нашла \"{', '.join(items)}\" в списках."
     await update.message.reply_text(r)
+    if all_removed:
+        await _try_edit_last_list(update, user_id)
     return r
 
 
