@@ -572,5 +572,65 @@
   {"id": "defer_not_now",
    "input": "не сейчас",
    "expected": {"intent": "defer"},
-   "check_fields": ["intent"]}
+   "check_fields": ["intent"]},
+
+  {"id": "create_note_basic",
+   "input": "заметка: Рецепт пасты — смешать фарш с томатами",
+   "expected": {"intent": "create_note", "title": "Рецепт пасты"},
+   "check_fields": ["intent", "title"]},
+
+  {"id": "create_note_with_tags",
+   "input": "сохрани идею: Запустить подкаст #работа #идеи",
+   "expected": {"intent": "create_note", "tags": ["работа", "идеи"]},
+   "check_fields": ["intent", "tags"]},
+
+  {"id": "create_note_with_url",
+   "input": "запомни ссылку https://example.com статья про продуктивность",
+   "expected": {"intent": "create_note", "url": "https://example.com"},
+   "check_fields": ["intent", "url"]},
+
+  {"id": "create_note_with_folder",
+   "input": "заметка в папке работа: Идея по проекту",
+   "expected": {"intent": "create_note", "folder": "работа"},
+   "check_fields": ["intent", "folder"]},
+
+  {"id": "show_notes_basic",
+   "input": "мои заметки",
+   "expected": {"intent": "show_notes"},
+   "check_fields": ["intent"]},
+
+  {"id": "show_notes_by_tag",
+   "input": "заметки по тегу работа",
+   "expected": {"intent": "show_notes", "tags": ["работа"]},
+   "check_fields": ["intent", "tags"]},
+
+  {"id": "find_note_basic",
+   "input": "найди заметку про рецепт",
+   "expected": {"intent": "find_note", "title": "рецепт"},
+   "check_fields": ["intent", "title"]},
+
+  {"id": "delete_note_basic",
+   "input": "удали заметку про рецепт",
+   "expected": {"intent": "delete_note"},
+   "check_fields": ["intent"]},
+
+  {"id": "rename_note_basic",
+   "input": "переименуй заметку Рецепт в Рецепт пасты",
+   "expected": {"intent": "rename_note", "new_title": "Рецепт пасты"},
+   "check_fields": ["intent", "new_title"]},
+
+  {"id": "show_folder_basic",
+   "input": "покажи папку работа",
+   "expected": {"intent": "show_folder", "folder_name": "работа"},
+   "check_fields": ["intent", "folder_name"]},
+
+  {"id": "create_list_with_urls",
+   "input": "Создай список: Полки для ванной. Добавь туда ссылки https://finn.no/item/1 https://finn.no/item/2. Поставь тег дом",
+   "expected": {"intent": "create_list", "list_name": "Полки для ванной", "items": ["https://finn.no/item/1", "https://finn.no/item/2"], "folder": "дом"},
+   "check_fields": ["intent", "list_name", "items", "folder"]},
+
+  {"id": "create_list_single_url",
+   "input": "добавь в список Фильмы: https://kinopoisk.ru/film/123",
+   "expected": {"intent": "add_to_list", "list_name": "Фильмы"},
+   "check_fields": ["intent", "list_name"]}
 ]

@@ -1,0 +1,36 @@
+
+Revory AI Test Suite — 2026-04-10 14:08
+Timezone: Europe/Moscow | Cases: 0
+
+
+───────────────────────────────────────────────────────
+  0/0 passed  (0%)
+
+
+Revory AI Test Suite — 2026-04-10 14:08
+Timezone: Europe/Moscow | Cases: 2
+
+✓ [create_list_with_date]  'список покупок на завтра: сахар, кофе'
+✓ [create_list_with_urls]  'Создай список: Полки для ванной. Добавь туда ссылки https://finn.no/item/1 https://finn.no/item/2. Поставь тег дом'
+
+───────────────────────────────────────────────────────
+  2/2 passed  (100%)
+
+
+Revory AI Test Suite — 2026-04-10 14:09
+Timezone: Europe/Moscow | Cases: 1
+
+✓ [show_folder_basic]  'покажи папку работа'
+
+───────────────────────────────────────────────────────
+  1/1 passed  (100%)
+
+
+Revory AI Test Suite — 2026-04-10 14:09
+Timezone: Europe/Moscow | Cases: 1
+
+✓ [rename_note_basic]  'переименуй заметку Рецепт в Рецепт пасты'
+
+───────────────────────────────────────────────────────
+  1/1 passed  (100%)
+

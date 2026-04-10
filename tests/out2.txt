@@ -1,0 +1,40 @@
+
+Revory AI Test Suite — 2026-04-10 14:10
+Timezone: Europe/Moscow | Cases: 4
+
+✓ [create_note_basic]  'заметка: Рецепт пасты — смешать фарш с томатами'
+✓ [create_note_with_tags]  'сохрани идею: Запустить подкаст #работа #идеи'
+✓ [create_note_with_url]  'запомни ссылку https://example.com статья про продуктивность'
+✓ [create_note_with_folder]  'заметка в папке работа: Идея по проекту'
+
+───────────────────────────────────────────────────────
+  4/4 passed  (100%)
+
+
+Revory AI Test Suite — 2026-04-10 14:10
+Timezone: Europe/Moscow | Cases: 2
+
+✓ [show_notes_basic]  'мои заметки'
+✓ [show_notes_by_tag]  'заметки по тегу работа'
+
+───────────────────────────────────────────────────────
+  2/2 passed  (100%)
+
+
+Revory AI Test Suite — 2026-04-10 14:10
+Timezone: Europe/Moscow | Cases: 1
+
+✓ [find_note_basic]  'найди заметку про рецепт'
+
+───────────────────────────────────────────────────────
+  1/1 passed  (100%)
+
+
+Revory AI Test Suite — 2026-04-10 14:10
+Timezone: Europe/Moscow | Cases: 1
+
+✓ [delete_note_basic]  'удали заметку про рецепт'
+
+───────────────────────────────────────────────────────
+  1/1 passed  (100%)
+

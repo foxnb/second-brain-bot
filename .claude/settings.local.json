@@ -12,7 +12,21 @@
       "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter create_event_color_red)",
       "Bash(PYTHONIOENCODING=utf-8 python tests/run_tests.py --filter help_capabilities)",
       "mcp__filesystem__directory_tree",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import json,sys; cases=json.load\\(sys.stdin\\); print\\(f'Total cases: {len\\(cases\\)}'\\); notes=[c for c in cases if 'note' in c.get\\('id',''\\) or 'note' in str\\(c.get\\('expected',{}\\).get\\('intent',''\\)\\)]; print\\(f'Note cases: {len\\(notes\\)}'\\); [print\\(c['id'],'-',c['input']\\) for c in notes[:10]]\")",
+      "Bash(python tests/run_tests.py --filter note)",
+      "Bash(python tests/run_tests.py --filter create_list_with)",
+      "Bash(python tests/run_tests.py --filter show_folder)",
+      "Bash(python tests/run_tests.py --filter rename_note)",
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(python -X utf8 tests/run_tests.py --filter note)",
+      "Bash(python -X utf8 tests/run_tests.py --filter create_list_with)",
+      "Bash(python -X utf8 tests/run_tests.py --filter show_folder)",
+      "Bash(python -X utf8 tests/run_tests.py --filter rename_note)",
+      "Bash(python -X utf8 tests/run_tests.py --filter create_note)",
+      "Bash(python -X utf8 tests/run_tests.py --filter show_notes)",
+      "Bash(python -X utf8 tests/run_tests.py --filter find_note)",
+      "Bash(python -X utf8 tests/run_tests.py --filter delete_note)"
     ]
   }
 }

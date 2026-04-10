@@ -75,12 +75,19 @@ async def handle_create_list(update: Update, user_id, parsed: dict, user_now: da
         })
         return r
 
+    folder = (parsed.get("folder") or "").strip() or None
     list_id = await create_list(
         user_id=user_id, name=display_name, list_type=list_type,
         target_date=target_date, auto_archive_at=auto_archive_at, icon=icon,
-        description=description,
+        description=description, folder=folder,
     )
     url = parsed.get("url")
+
+    # Фолбэк: если AI положил URL в поле url, но items пустой — добавляем как элемент
+    if url and not items:
+        items = [url]
+        url = None
+
     if items:
         await add_list_items(list_id, items, added_by=user_id, url=url)
     date_label = format_date_label(target_date, user_now)

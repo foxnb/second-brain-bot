@@ -1,0 +1,150 @@
+AI not JSON: Я могу помочь тебе с различными задачами, такими как:
+
+* Создание и управление событиями и встречами
+* Управление списками покупок, дел и коллекций
+* Создание и управление заметками и проектами
+* Настройка часов и подключение календаря
+* И многое другое!
+
+Напиши мне, что ты хочешь сделать, и я сделаю всё возможное, чтобы помочь тебе. Например, ты можешь написать "встреча завтра в 15:00" или "что у меня сегодня?".
+
+{
+  "intent": "help",
+  "reply": "Я могу помочь тебе с различными задачами, такими как создание и управление событиями и встречами, управление списками покупок, дел и коллекций, создание и управление заметками и проектами, настройка часов и подключение календаря и многое другое!"
+} | Error: Expecting value: line 1 column 1 (char 0)
+AI not JSON: всё хорошо, спасибо! 
+{
+  "intent": "chitchat",
+  "reply": "всё хорошо, спасибо!"
+} | Error: Expecting value: line 1 column 1 (char 0)
+
+Revory AI Test Suite — 2026-04-10 14:11
+Timezone: Europe/Moscow | Cases: 113
+
+✓ [create_event_basic]  'встреча завтра в 15:00'
+✓ [create_event_morning_suffix]  'созвон в 9 утра'
+✓ [create_event_afternoon_suffix]  'обед в 2 дня'
+✓ [create_event_evening_suffix]  'ужин в 7 вечера'
+✓ [create_event_night_suffix]  'встреча в 2 ночи'
+✓ [create_event_midnight]  'встреча в 12 ночи'
+✓ [create_event_noon]  'обед в 12'
+✓ [create_event_ambiguous_low]  'встреча в 3'
+✓ [create_event_ambiguous_morning_8]  'встреча в 8'
+✓ [create_event_ambiguous_morning_11]  'встреча в 11'
+✓ [create_event_24h_exact]  'встреча в 16:30'
+✓ [create_event_next_friday]  'созвон в пятницу в 10:00'
+✓ [create_event_day_after_tomorrow]  'встреча послезавтра в 14:00'
+✓ [create_event_color_red]  'встреча завтра в 10 утра, отметь красным'
+✓ [create_event_color_blue]  'созвон в пятницу в 15:00, синим цветом'
+✓ [create_event_color_yellow]  'дедлайн в пятницу, выдели жёлтым'
+✓ [create_event_relative_30min]  'встреча через 30 минут'
+✓ [create_event_relative_2h]  'созвон через 2 часа'
+✓ [create_event_no_color]  'встреча с Иваном завтра в 9 утра'
+✓ [show_events_today]  'что у меня сегодня'
+✗ [show_events_tomorrow]  'расписание на завтра'
+    period: expected='tomorrow'  got=None
+✓ [show_events_week]  'планы на неделю'
+✓ [show_events_today_alt]  'что запланировано на сегодня?'
+✓ [delete_event_by_name]  'удали встречу с Аней'
+✓ [delete_event_cancel]  'отмени обед в среду'
+✓ [bulk_delete_today]  'удали все события сегодня'
+✓ [bulk_delete_week]  'удали всё на этой неделе'
+✓ [bulk_delete_by_color_red]  'удали все красные события'
+✓ [bulk_delete_by_color_blue]  'удали все синие'
+✓ [bulk_delete_no_filter_default_today]  'удали все мои события'
+✓ [move_by_color_blue_tomorrow]  'перенеси все синие на завтра'
+✓ [move_by_color_red_fixed_date]  'сдвинь красные на 10 апреля'
+✓ [move_by_color_green_friday]  'перенеси зелёные на пятницу'
+✓ [remind_fixed_time]  'напомни позвонить маме в 18:00'
+✓ [remind_tomorrow_morning]  'напомни купить молоко завтра в 9 утра'
+✓ [remind_relative]  'напомни через полчаса'
+✓ [create_list_checklist_items]  'список покупок: молоко, хлеб, яйца'
+✓ [create_list_collection]  'создай список фильмов'
+✓ [create_list_with_date]  'список покупок на завтра: сахар, кофе'
+✗ [create_list_no_date_defaults_today]  'список покупок: молоко'
+    intent: expected='create_list'  got='show_list'
+    date: expected='2026-04-10'  got=None
+✓ [create_list_books]  'создай список книг: Дюна, 1984'
+✓ [add_to_list_basic]  'добавь яблоки в покупки'
+✓ [add_to_list_collection]  'добавь Интерстеллар в список фильмов'
+✓ [show_list_explicit]  'что в списке покупок?'
+✓ [show_list_implicit]  'что купить?'
+✓ [show_list_movies]  'покажи список фильмов'
+✓ [check_items_verb_female]  'взяла молоко'
+✓ [check_items_plus]  'молоко+'
+✓ [check_items_multiple]  'купила молоко и хлеб'
+✓ [remove_from_list_basic]  'удали молоко из покупок'
+✓ [remove_from_list_verb2]  'убери хлеб из списка покупок'
+✓ [delete_list_shopping]  'удали список покупок'
+✓ [delete_list_movies]  'удали список фильмов'
+✓ [show_lists_possessive]  'мои списки'
+✓ [show_lists_question]  'какие у меня есть списки?'
+✓ [setup_colors_command]  'настрой цвета'
+✓ [setup_colors_mine]  'мои цвета'
+✓ [change_timezone_change]  'поменяй часовой пояс'
+✓ [change_timezone_query]  'какой у меня часовой пояс?'
+✓ [connect_calendar_google]  'подключить гугл календарь'
+✓ [delete_account_data]  'удали мои данные'
+✓ [delete_account_logout]  'выйти'
+✗ [help_capabilities]  'что ты умеешь?'
+    intent: expected='help'  got='unknown'
+✓ [help_command]  'помощь'
+✓ [chitchat_hello]  'привет'
+✓ [chitchat_thanks]  'спасибо!'
+✗ [chitchat_how_are_you]  'как дела?'
+    intent: expected='chitchat'  got='unknown'
+✓ [unknown_weather]  'какая погода в Москве?'
+✗ [unknown_random]  'ля ля ля фа фа фа'
+    intent: expected='chitchat'  got='unknown'
+✓ [edit_event_rename_basic]  'переименуй встречу с Аней на созвон с командой'
+✓ [edit_event_rename_garbage]  'переименуй вынести мусор на вынести бытовой мусор'
+✓ [edit_event_rename_meeting]  'замени название встреча с клиентом на переговоры с партнёром'
+✓ [search_event_when]  'когда встреча с Аней?'
+✓ [search_event_when_garbage]  'когда надо вынести мусор?'
+✗ [search_event_scheduled]  'на когда запланирован дедлайн?'
+    intent: expected='search_event'  got='show_events'
+    title: expected='дедлайн'  got=None
+✓ [search_event_dentist]  'когда у меня зубной?'
+✓ [set_item_status_in_progress]  'полить цветы — в работе'
+✗ [set_item_status_done]  'поставь статус сделано для встречи с клиентом'
+    intent: expected='set_item_status'  got='set_event_status'
+✓ [set_item_status_with_list]  'поставь статус в работе для молоко в покупках'
+✓ [edit_list_item_rename]  'поменяй полить цветы на полить орхидею'
+✓ [edit_list_item_rename_alt]  'переименуй молоко на молоко 3.2% в покупках'
+✓ [move_list_item_basic]  'перенеси молоко из покупок в продукты'
+✓ [move_list_item_movie]  'перемести Дюну из хочу посмотреть в посмотрено'
+✓ [reschedule_event_to_friday]  'перенеси встречу с Аней на пятницу'
+✓ [reschedule_event_with_time]  'перенеси созвон на завтра в 11'
+✓ [change_event_color_red]  'отметь встречу с Аней красным'
+✓ [change_event_color_blue]  'покрась дедлайн синим'
+✓ [color_lavender]  'встреча в 10, цвет лавандовый'
+✓ [color_sage]  'встреча завтра, отметь шалфеем'
+✓ [color_pink]  'встреча в 15:00 розовым'
+✓ [color_orange]  'дедлайн в пятницу оранжевым'
+✓ [color_graphite]  'встреча завтра серым'
+✓ [color_green]  'тренировка в 19:00 зелёным'
+✓ [color_violet_synonym]  'встреча завтра, выдели фиолетовым'
+✓ [color_dark_blue]  'созвон в понедельник тёмно-синим'
+✓ [bulk_delete_by_color_green]  'удали все зелёные события'
+✓ [bulk_delete_by_color_yellow]  'убери все жёлтые'
+✓ [configure_statuses_list]  'хочу настроить статусы в покупках'
+✓ [configure_statuses_general]  'какие у меня статусы дел?'
+✓ [defer_later]  'потом'
+✓ [defer_not_now]  'не сейчас'
+✓ [create_note_basic]  'заметка: Рецепт пасты — смешать фарш с томатами'
+✓ [create_note_with_tags]  'сохрани идею: Запустить подкаст #работа #идеи'
+✓ [create_note_with_url]  'запомни ссылку https://example.com статья про продуктивность'
+✓ [create_note_with_folder]  'заметка в папке работа: Идея по проекту'
+✓ [show_notes_basic]  'мои заметки'
+✓ [show_notes_by_tag]  'заметки по тегу работа'
+✓ [find_note_basic]  'найди заметку про рецепт'
+✓ [delete_note_basic]  'удали заметку про рецепт'
+✓ [rename_note_basic]  'переименуй заметку Рецепт в Рецепт пасты'
+✓ [show_folder_basic]  'покажи папку работа'
+✓ [create_list_with_urls]  'Создай список: Полки для ванной. Добавь туда ссылки https://finn.no/item/1 https://finn.no/item/2. Поставь тег дом'
+✓ [create_list_single_url]  'добавь в список Фильмы: https://kinopoisk.ru/film/123'
+
+───────────────────────────────────────────────────────
+  106/113 passed  (94%)
+  7 failed
+

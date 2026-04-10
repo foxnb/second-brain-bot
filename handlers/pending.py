@@ -256,6 +256,10 @@ async def _handle_create_list_duplicate_confirm(update: Update, user_id, text: s
         user_id=user_id, name=display_name, list_type=list_type,
         target_date=target_date, auto_archive_at=auto_archive_at, icon=icon,
     )
+    # Фолбэк: url без items → добавить url как элемент
+    if url and not items:
+        items = [url]
+        url = None
     if items:
         await add_list_items(list_id, items, added_by=user_id, url=url)
     clear_pending(user_id)
@@ -1258,11 +1262,47 @@ async def _handle_note_attachment_title(update: Update, user_id, text: str, pend
     return True
 
 
+_STOP_WORDS = {
+    "не", "нет", "да", "и", "в", "на", "по", "с", "к", "у", "о",
+    "но", "уже", "ещё", "еще", "то", "это", "так", "там", "тут",
+    "всё", "все", "он", "она", "они", "мне", "мой", "моя", "их",
+    "вот", "как", "что", "кто", "где", "за", "из", "от", "до",
+    "нужно", "надо", "хочу", "можно", "пока", "ок", "окей",
+    "спасибо", "пожалуйста", "thanks", "thank", "no", "yes",
+}
+
+
+def _is_cancel_phrase(text: str) -> bool:
+    """Определяет, является ли текст отказом/пропуском добавления тегов."""
+    lower = text.lower().strip()
+    # Точное совпадение
+    exact = {"нет", "не надо", "пропустить", "пропусти", "ок", "окей",
+             "хорошо", "готово", "skip", "cancel", "no", "👍", "не нужно"}
+    if lower in exact:
+        return True
+    # Фраза содержит отрицание + нужно/надо/хочу или просто «спасибо, не нужно»
+    neg_words = ("не нужно", "не надо", "нет, спасибо", "не хочу",
+                 "не нужны", "не нужен", "без тегов", "без тега",
+                 "спасибо, не", "не, спасибо", "нет спасибо")
+    if any(p in lower for p in neg_words):
+        return True
+    # Фраза начинается с «нет» или «не »
+    if lower.startswith("нет") or lower.startswith("не "):
+        return True
+    return False
+
+
 def _parse_tags_from_text(text: str) -> list[str]:
-    """Парсит теги из произвольного текста ответа пользователя."""
+    """Парсит теги из произвольного текста ответа пользователя.
+    Фильтрует стоп-слова и слишком короткие токены."""
     text = re.sub(r'#', '', text)
     tokens = re.split(r'[,;\s]+', text.strip())
-    return [t.strip().lower() for t in tokens if t.strip() and len(t.strip()) >= 2]
+    return [
+        t.strip().lower() for t in tokens
+        if t.strip()
+        and len(t.strip()) >= 2
+        and t.strip().lower() not in _STOP_WORDS
+    ]
 
 
 async def _handle_note_after_save(update: Update, user_id, text: str, pending: dict) -> bool:
@@ -1272,7 +1312,7 @@ async def _handle_note_after_save(update: Update, user_id, text: str, pending: d
     lower = text.lower().strip()
 
     # Отмена / пропуск
-    if lower in ("нет", "не надо", "пропустить", "ок", "окей", "хорошо", "готово", "skip", "cancel", "👍"):
+    if _is_cancel_phrase(lower):
         clear_pending(user_id)
         r = "👌"
         await update.message.reply_text(r)
