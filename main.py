@@ -372,6 +372,7 @@ async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYP
     """Фото и документы в личке сохраняются как заметки."""
     from handlers.notes import handle_photo_or_document
     from handlers.utils import resolve_user
+    from handlers.pending import get_pending
 
     chat_type = update.message.chat.type if update.message else "private"
     if chat_type in ("group", "supergroup"):
@@ -383,7 +384,8 @@ async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ Нажми /start сначала.")
         return
 
-    await handle_photo_or_document(update, user_id)
+    pending = get_pending(user_id)
+    await handle_photo_or_document(update, user_id, pending=pending)
 
 
 async def auth_callback(request: Request):

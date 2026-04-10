@@ -39,6 +39,8 @@ from handlers.notes import (
     handle_show_notes,
     handle_find_note,
     handle_delete_note,
+    handle_rename_note,
+    handle_show_folder,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,10 @@ async def _dispatch_intent(update: Update, user_id, parsed: dict, user_now, tz_n
         reply_text = await handle_find_note(update, user_id, parsed)
     elif intent == "delete_note":
         reply_text = await handle_delete_note(update, user_id, parsed)
+    elif intent == "rename_note":
+        reply_text = await handle_rename_note(update, user_id, parsed)
+    elif intent == "show_folder":
+        reply_text = await handle_show_folder(update, user_id, parsed)
     elif intent == "setup_colors":
         reply_text = await handle_setup_colors(update, user_id)
     elif intent == "change_timezone":

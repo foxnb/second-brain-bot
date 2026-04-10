@@ -947,17 +947,18 @@ async def create_list(
     icon: str = None,
     settings: dict = None,
     description: str = None,
+    folder: Optional[str] = None,
 ) -> int:
     """Создаёт список. Возвращает list_id."""
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO lists (user_id, name, list_type, target_date, auto_archive_at, icon, settings, description)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO lists (user_id, name, list_type, target_date, auto_archive_at, icon, settings, description, folder)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id
         """,
         user_id, name, list_type, target_date, auto_archive_at,
-        icon, json.dumps(settings) if settings else None, description,
+        icon, json.dumps(settings) if settings else None, description, folder,
     )
     logger.info(f"Created list '{name}' (type={list_type}) for user {user_id}, id={row['id']}")
     return row["id"]
@@ -1586,16 +1587,17 @@ async def create_note(
     tags: Optional[list[str]] = None,
     attachment_file_id: Optional[str] = None,
     attachment_file_type: Optional[str] = None,
+    folder: Optional[str] = None,
 ) -> int:
     """Создаёт заметку. Возвращает id."""
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO notes (user_id, title, content, url, tags, attachment_file_id, attachment_file_type)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO notes (user_id, title, content, url, tags, attachment_file_id, attachment_file_type, folder)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id
         """,
-        user_id, title, content, url, tags or [], attachment_file_id, attachment_file_type,
+        user_id, title, content, url, tags or [], attachment_file_id, attachment_file_type, folder,
     )
     return row["id"]
 
@@ -1664,5 +1666,107 @@ async def delete_note(user_id: UUID, note_id: int) -> bool:
         note_id, user_id,
     )
     return "UPDATE 1" in result
+
+
+async def update_note(
+    user_id: UUID,
+    note_id: int,
+    *,
+    title: Optional[str] = None,
+    url: Optional[str] = None,
+    folder: Optional[str] = None,
+    attachment_file_id: Optional[str] = None,
+    attachment_file_type: Optional[str] = None,
+) -> bool:
+    """Обновляет поля заметки (только переданные не-None)."""
+    pool = await get_pool()
+    sets = []
+    values = []
+    idx = 1
+
+    if title is not None:
+        sets.append(f"title = ${idx}")
+        values.append(title)
+        idx += 1
+    if url is not None:
+        sets.append(f"url = ${idx}")
+        values.append(url)
+        idx += 1
+    if folder is not None:
+        sets.append(f"folder = ${idx}")
+        values.append(folder)
+        idx += 1
+    if attachment_file_id is not None:
+        sets.append(f"attachment_file_id = ${idx}")
+        values.append(attachment_file_id)
+        idx += 1
+    if attachment_file_type is not None:
+        sets.append(f"attachment_file_type = ${idx}")
+        values.append(attachment_file_type)
+        idx += 1
+
+    if not sets:
+        return False
+
+    sets.append(f"updated_at = now()")
+    values.extend([note_id, user_id])
+    query = f"UPDATE notes SET {', '.join(sets)} WHERE id = ${idx} AND user_id = ${idx + 1} AND is_deleted = FALSE"
+    result = await pool.execute(query, *values)
+    return "UPDATE 1" in result
+
+
+async def add_note_tags(user_id: UUID, note_id: int, new_tags: list[str]) -> bool:
+    """Добавляет теги к заметке (без дублей)."""
+    pool = await get_pool()
+    # Merge via array_cat + array_agg with distinct
+    result = await pool.execute(
+        """
+        UPDATE notes
+        SET tags = ARRAY(SELECT DISTINCT unnest(tags || $3::text[])),
+            updated_at = now()
+        WHERE id = $1 AND user_id = $2 AND is_deleted = FALSE
+        """,
+        note_id, user_id, new_tags,
+    )
+    return "UPDATE 1" in result
+
+
+async def get_user_note_tags(user_id: UUID) -> list[str]:
+    """Возвращает все уникальные теги пользователя из заметок."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT unnest(tags) AS tag
+        FROM notes
+        WHERE user_id = $1 AND is_deleted = FALSE AND array_length(tags, 1) > 0
+        ORDER BY tag
+        """,
+        user_id,
+    )
+    return [r["tag"] for r in rows]
+
+
+async def get_folder_contents(user_id: UUID, folder: str) -> dict:
+    """Возвращает заметки и списки из папки."""
+    pool = await get_pool()
+    notes = await pool.fetch(
+        """
+        SELECT id, title, tags, attachment_file_id, created_at
+        FROM notes
+        WHERE user_id = $1 AND folder = $2 AND is_deleted = FALSE
+        ORDER BY created_at DESC
+        """,
+        user_id, folder,
+    )
+    lists = await pool.fetch(
+        """
+        SELECT id, name, list_type, icon
+        FROM lists
+        WHERE user_id = $1 AND folder = $2 AND COALESCE(status, 'active') != 'archived'
+        ORDER BY created_at DESC
+        """,
+        user_id, folder,
+    )
+    return {"notes": [dict(r) for r in notes], "lists": [dict(r) for r in lists]}
 
 

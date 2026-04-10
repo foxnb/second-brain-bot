@@ -21,6 +21,9 @@ from services.database import (
     get_color_mappings,
     create_note,
     delete_note,
+    update_note,
+    add_note_tags,
+    get_user_note_tags,
 )
 from services.calendar import delete_event, move_event
 from handlers.utils import extract_number
@@ -141,8 +144,19 @@ async def handle_pending(update: Update, user_id, text: str, pending: dict) -> b
         return await _handle_group_task_reschedule_date(update, user_id, text, pending)
     if action == "delete_note_choice":
         return await _handle_delete_note_choice(update, user_id, text, pending)
+    if action == "rename_note_choice":
+        return await _handle_rename_note_choice(update, user_id, text, pending)
     if action == "note_attachment_title":
         return await _handle_note_attachment_title(update, user_id, text, pending)
+    if action == "note_after_save":
+        return await _handle_note_after_save(update, user_id, text, pending)
+    if action == "note_replace_attachment":
+        # Ждём фото — текстовые сообщения игнорируем мягко
+        r = "📎 Пришли фото или файл, который нужно прикрепить к заметке."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
     return False
 
 
@@ -1196,8 +1210,8 @@ async def _handle_delete_note_choice(update: Update, user_id, text: str, pending
 
 async def _handle_note_attachment_title(update: Update, user_id, text: str, pending: dict) -> bool:
     """Пользователь вводит название для заметки с прикреплённым файлом."""
-    title = text.strip()
-    if not title:
+    raw = text.strip()
+    if not raw:
         r = "📎 Введи название заметки:"
         await update.message.reply_text(r)
         return True
@@ -1213,10 +1227,162 @@ async def _handle_note_attachment_title(update: Update, user_id, text: str, pend
 
     file_type = pending.get("file_type", "document")
     type_word = "фото" if file_type == "photo" else "файл"
+
+    # Разбираем название + возможные инлайн-теги ("Ценности, поставь тег: работа")
+    from handlers.notes import _parse_title_with_tags
+    title, inline_tags = _parse_title_with_tags(raw)
     clear_pending(user_id)
 
-    await create_note(user_id, title, attachment_file_id=file_id, attachment_file_type=file_type)
-    r = f"📝 Заметка «{title}» сохранена с {type_word}."
+    note_id = await create_note(
+        user_id, title,
+        tags=inline_tags or [],
+        attachment_file_id=file_id,
+        attachment_file_type=file_type,
+    )
+
+    parts = [f"📝 Заметка «{title}» сохранена с {type_word}"]
+    if inline_tags:
+        from handlers.notes import _format_tags
+        parts.append("🏷 " + _format_tags(inline_tags))
+    tag_hint = "\n\nДобавить ещё теги?" if inline_tags else "\n\nДобавить теги?"
+    r = "\n".join(parts) + tag_hint
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", "\n".join(parts))
+
+    set_pending(user_id, "note_after_save", {
+        "note_id": note_id,
+        "note_title": title,
+        "has_tags": bool(inline_tags),
+    })
+    return True
+
+
+def _parse_tags_from_text(text: str) -> list[str]:
+    """Парсит теги из произвольного текста ответа пользователя."""
+    text = re.sub(r'#', '', text)
+    tokens = re.split(r'[,;\s]+', text.strip())
+    return [t.strip().lower() for t in tokens if t.strip() and len(t.strip()) >= 2]
+
+
+async def _handle_note_after_save(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Контекст после сохранения заметки: добавление тегов, переименование, ссылки, замена фото."""
+    note_id = pending.get("note_id")
+    note_title = pending.get("note_title", "заметка")
+    lower = text.lower().strip()
+
+    # Отмена / пропуск
+    if lower in ("нет", "не надо", "пропустить", "ок", "окей", "хорошо", "готово", "skip", "cancel", "👍"):
+        clear_pending(user_id)
+        r = "👌"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Показать существующие теги
+    if any(kw in lower for kw in ("какие теги", "мои теги", "список тегов", "теги есть", "покажи теги")):
+        tags = await get_user_note_tags(user_id)
+        if tags:
+            from handlers.notes import _format_tags
+            r = "🏷 Твои теги:\n" + _format_tags(tags) + "\n\nНапиши нужные (или «нет»):"
+        else:
+            r = "У тебя пока нет тегов. Напиши новые (или «нет»):"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True  # Pending сохраняется — ждём выбор тега
+
+    # Переименование
+    rename_m = re.match(
+        r'(?:переименуй|переименовать|назови|переименовываю|переименовываем)\s+(?:в\s+)?(.+)',
+        lower,
+    )
+    if rename_m:
+        new_title = rename_m.group(1).strip()
+        # Восстанавливаем регистр из оригинала
+        orig_lower_idx = lower.index(rename_m.group(1))
+        new_title_orig = text[orig_lower_idx:orig_lower_idx + len(new_title)]
+        await update_note(user_id, note_id, title=new_title_orig)
+        clear_pending(user_id)
+        r = f"✏️ Переименована: «{new_title_orig}»"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Добавить ссылку
+    url_m = re.search(r'https?://\S+', text)
+    if url_m:
+        url = url_m.group(0).rstrip('.,)')
+        await update_note(user_id, note_id, url=url)
+        clear_pending(user_id)
+        r = f"🔗 Ссылка добавлена к «{note_title}»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Замена фото/вложения
+    if any(kw in lower for kw in (
+        "замени фото", "поменяй фото", "другое фото", "новое фото",
+        "замени картинку", "поменяй картинку", "замени файл", "поменяй файл",
+    )):
+        set_pending(user_id, "note_replace_attachment", {
+            "note_id": note_id,
+            "note_title": note_title,
+        })
+        r = "📎 Пришли новое фото или файл:"
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    # Иначе — воспринимаем как теги
+    tags = _parse_tags_from_text(text)
+    if tags:
+        await add_note_tags(user_id, note_id, tags)
+        clear_pending(user_id)
+        from handlers.notes import _format_tags
+        r = "🏷 Теги добавлены: " + _format_tags(tags)
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    r = "Напиши теги (например: работа проект) или «нет» чтобы пропустить."
+    await update.message.reply_text(r)
+    await save_message(user_id, "user", text)
+    await save_message(user_id, "assistant", r)
+    return True
+
+
+async def _handle_rename_note_choice(update: Update, user_id, text: str, pending: dict) -> bool:
+    """Выбор заметки для переименования из нескольких совпадений."""
+    notes = pending.get("notes", [])
+    new_title = pending.get("new_title", "")
+    lower = text.lower().strip()
+
+    if lower in ("отмена", "отмени", "нет", "не надо", "cancel"):
+        clear_pending(user_id)
+        r = "👌 Отменено."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    number = extract_number(text)
+    if number is None or number < 1 or number > len(notes):
+        r = f"❌ Введи число от 1 до {len(notes)}, или «отмена»."
+        await update.message.reply_text(r)
+        await save_message(user_id, "user", text)
+        await save_message(user_id, "assistant", r)
+        return True
+
+    note = notes[number - 1]
+    clear_pending(user_id)
+    success = await update_note(user_id, note["id"], title=new_title)
+    r = f"✏️ Заметка переименована: «{new_title}»" if success else "❌ Не удалось переименовать."
     await update.message.reply_text(r)
     await save_message(user_id, "user", text)
     await save_message(user_id, "assistant", r)

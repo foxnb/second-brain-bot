@@ -24,7 +24,7 @@
 
 **Pending actions** — мультишаговые диалоги через `_pending_actions` dict с 5-минутным TTL.
 Паттерн: set_pending() → handle_pending() → clear_pending().
-Текущие pending: `delete_choice`, `create_list_confirm`, `create_list_duplicate_confirm`, `add_to_list_choice`, `delete_list_choice`, `color_setup`, `color_edit`, `bulk_delete_confirm`, `move_by_color_confirm`, `create_duplicate_confirm`, `task_destination_choice`, `reschedule_choice`, `change_color_choice`, `edit_event_choice`, `move_item_create_confirm`, `configure_statuses`, `configure_statuses_choice`, `set_event_status_choice`, `group_new_project_name`, `group_task_reschedule_date`.
+Текущие pending: `delete_choice`, `create_list_confirm`, `create_list_duplicate_confirm`, `add_to_list_choice`, `delete_list_choice`, `color_setup`, `color_edit`, `bulk_delete_confirm`, `move_by_color_confirm`, `create_duplicate_confirm`, `task_destination_choice`, `reschedule_choice`, `change_color_choice`, `edit_event_choice`, `move_item_create_confirm`, `configure_statuses`, `configure_statuses_choice`, `set_event_status_choice`, `group_new_project_name`, `group_task_reschedule_date`, `delete_note_choice`, `rename_note_choice`, `note_attachment_title`, `note_after_save`, `note_replace_attachment`.
 
 **Списки** — `checklist` (чекбоксы + статусы, auto_archive_at) и `collection` (постоянные без чекбоксов).
 - Имя checklist формируется как «Дела 04.04» — дата добавляется кодом, list_name из AI = только суть без слов-дат.
@@ -41,7 +41,10 @@
 
 **Токены** — plain JSON в calendar_connections (TODO: AES-256-Fernet).
 
-**Заметки** — `handlers/notes.py`, таблица `notes` (migration v16). Поля: title, content, url, tags (TEXT[]). Функции DB: `create_note`, `get_user_notes(tag=, limit=)`, `find_notes_by_query`, `delete_note`.
+**Заметки** — `handlers/notes.py`, таблица `notes` (migration v16+v17). Поля: title, content, url, tags (TEXT[]), folder (TEXT). Функции DB: `create_note(folder=)`, `get_user_notes(tag=, limit=)`, `find_notes_by_query`, `delete_note`, `update_note(title,url,folder,attachment_*)`, `add_note_tags`, `get_user_note_tags`, `get_folder_contents`.
+**Post-save flow** — после создания заметки (текст/фото) устанавливается pending `note_after_save`. Пользователь может: добавить теги, спросить «какие теги есть?», переименовать, добавить ссылку, запросить замену фото (→ pending `note_replace_attachment`), сказать «нет» для завершения.
+**Inline теги в названии** — `_parse_title_with_tags()` в notes.py разбирает «Название, поставь тег: работа» и «Название #тег1 #тег2».
+**Папки** — `folder` TEXT в таблицах `notes` и `lists` (migration v17). Интент `show_folder` → `handle_show_folder`. `create_note`/`create_list` принимают `folder=`.
 
 ## Деплой
 
@@ -96,10 +99,12 @@ SQL миграции — вручную в Supabase SQL Editor
 ### Заметки
 | Intent | Описание | Ключевые поля |
 |--------|----------|---------------|
-| create_note | Сохранить заметку | title, description, url, tags |
+| create_note | Сохранить заметку | title, description, url, tags, folder |
 | show_notes | Показать заметки (все или по тегу) | tags |
 | find_note | Найти конкретную заметку | title (поисковый запрос) |
 | delete_note | Удалить заметку | title |
+| rename_note | Переименовать заметку | title=старое, new_title=новое |
+| show_folder | Показать содержимое папки | folder_name |
 
 ### Системные
 | Intent | Описание |
@@ -126,7 +131,7 @@ SQL миграции — вручную в Supabase SQL Editor
 - [ ] **Применить миграцию v16** — выполнить `migrations/v16_notes.sql` в Supabase SQL Editor (таблица notes)
 - [ ] **Шифрование токенов** — AES-256-Fernet, ENCRYPTION_KEY env
 - [ ] **grammar_form** — m/f/n для корректных ответов ("свободен"/"свободна")
-- [ ] **Composite commands** — несколько интентов за раз
+- [x] **Composite commands** — несколько интентов за раз (реализовано через `intents` array в AI)
 - [ ] **Тестирование цветов** — проверить парсер на реальных данных в проде
 - [ ] **Обновить тест-сет** — добавить кейсы для новых интентов (convert_list, check_items, notes и др.)
 - [ ] **`_last_list_msg` после рестарта** — сейчас in-memory, сбрасывается при деплое; рассмотреть хранение в Redis/БД
