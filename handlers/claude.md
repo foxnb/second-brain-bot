@@ -24,18 +24,24 @@
 
 **Pending actions** — мультишаговые диалоги через `_pending_actions` dict с 5-минутным TTL.
 Паттерн: set_pending() → handle_pending() → clear_pending().
-Текущие pending: delete_choice, create_list_confirm, add_to_list_choice, delete_list_choice, color_setup, color_edit, bulk_delete_confirm, move_by_color_confirm, create_duplicate_confirm, task_destination_choice, reschedule_choice, change_color_choice, edit_event_choice, move_item_create_confirm, configure_statuses.
+Текущие pending: `delete_choice`, `create_list_confirm`, `create_list_duplicate_confirm`, `add_to_list_choice`, `delete_list_choice`, `color_setup`, `color_edit`, `bulk_delete_confirm`, `move_by_color_confirm`, `create_duplicate_confirm`, `task_destination_choice`, `reschedule_choice`, `change_color_choice`, `edit_event_choice`, `move_item_create_confirm`, `configure_statuses`, `configure_statuses_choice`, `set_event_status_choice`, `group_new_project_name`, `group_task_reschedule_date`.
 
 **Списки** — `checklist` (чекбоксы + статусы, auto_archive_at) и `collection` (постоянные без чекбоксов).
 - Имя checklist формируется как «Дела 04.04» — дата добавляется кодом, list_name из AI = только суть без слов-дат.
 - Статусы элементов: `todo` ☐ / `in_progress` ▶ / `done` ✅ (колонка status в list_items, migration v11).
 - Кастомные статусы хранятся в `lists.settings JSONB` → `{"statuses": [...]}`.
+- **Важно:** `status` колонка имеет `DEFAULT 'todo'`. SQL-запрос `get_list_items` использует `CASE WHEN is_checked THEN 'done' ELSE COALESCE(status, 'todo') END` — иначе COALESCE всегда вернёт 'todo' даже для выполненных.
+- **Редактирование списка на месте:** `_last_list_msg` (in-memory dict) хранит `{msg_id, chat_id, list_id, list_data}` последнего отправленного сообщения со списком. `_try_edit_last_list()` редактирует это сообщение через `edit_message_text`, при неудаче — отправляет новое.
+- **PgBouncer lag:** параметр `just_checked` в `_try_edit_last_list` принудительно проставляет `is_checked=True, status='done'` в Python до рендера, обходя устаревшее чтение из пула соединений.
+- **Приоритет поиска:** при check_items/remove_from_list без явного list_name — сначала ищем в последнем показанном списке (`_last_list_msg`), затем в остальных.
 
 **Цветовая модель** — Google colorId (1-11) → color_mappings (label + emoji). Автовопрос при первом обнаружении (colors_asked flag).
 
 **PostgreSQL нюансы** — COALESCE-based upserts вместо ON CONFLICT для nullable unique columns; list_type как free-text + JSONB.
 
 **Токены** — plain JSON в calendar_connections (TODO: AES-256-Fernet).
+
+**Заметки** — `handlers/notes.py`, таблица `notes` (migration v16). Поля: title, content, url, tags (TEXT[]). Функции DB: `create_note`, `get_user_notes(tag=, limit=)`, `find_notes_by_query`, `delete_note`.
 
 ## Деплой
 
@@ -83,8 +89,9 @@ SQL миграции — вручную в Supabase SQL Editor
 | check_items | Отметить выполненным | items, list_name |
 | set_item_status | Поставить статус элементу | title, status, list_name |
 | configure_statuses | Настроить статусы списка | list_name |
-| remove_from_list | Убрать элемент | items, list_name |
+| remove_from_list | Убрать элемент (физически) | items, list_name |
 | delete_list | Удалить список | list_name |
+| convert_list | Конвертировать тип списка | list_name, list_type |
 
 ### Заметки
 | Intent | Описание | Ключевые поля |
@@ -116,13 +123,13 @@ SQL миграции — вручную в Supabase SQL Editor
 ## Бэклог
 
 ### Ближайшие задачи
-- [ ] **Применить миграцию v16** — выполнить `migrations/v16_notes.sql` в Supabase SQL Editor
+- [ ] **Применить миграцию v16** — выполнить `migrations/v16_notes.sql` в Supabase SQL Editor (таблица notes)
 - [ ] **Шифрование токенов** — AES-256-Fernet, ENCRYPTION_KEY env
 - [ ] **grammar_form** — m/f/n для корректных ответов ("свободен"/"свободна")
-- [ ] **Голосовые** — voice → текст → AI парсинг — handlers/voice.py
 - [ ] **Composite commands** — несколько интентов за раз
 - [ ] **Тестирование цветов** — проверить парсер на реальных данных в проде
-- [ ] **Обновить тест-сет** — добавить кейсы для новых интентов (edit_event, search_event, set_item_status и др.)
+- [ ] **Обновить тест-сет** — добавить кейсы для новых интентов (convert_list, check_items, notes и др.)
+- [ ] **`_last_list_msg` после рестарта** — сейчас in-memory, сбрасывается при деплое; рассмотреть хранение в Redis/БД
 
 ### Средний горизонт
 - [ ] **PWA** — FastAPI поверх services/, JWT-auth, React/Next.js
